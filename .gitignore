@@ -5,6 +5,7 @@ backup/
 *.exe 
 *.pdb 
 *.ilk 
+*.ini
 *.res 
 *.suo 
 .vs/ 

@@ -1,8 +1,9 @@
 /*
- * GyroScroll - Lightweight dependency-free chiral touchpad scrolling for Windows
+ * GyroScroll - Lightweight dependency-free circular touchpad scrolling for Windows
  *
  * Uses Windows Raw HID input to read touchpad finger coordinates directly.
- * No wxWidgets, no abseil — only the Windows SDK (user32, hid, setupapi, shell32).
+ * No wxWidgets, no abseil — only the Windows SDK (user32, hid, setupapi, shell32,
+ * comctl32, gdi32, advapi32).
  *
  * ─── BUILD ────────────────────────────────────────────────────────────────────
  *
@@ -13,35 +14,45 @@
  * MinGW-w64:
  *   windres GyroScroll.rc -o GyroScroll.res
  *   g++ -O2 -mwindows -o GyroScroll.exe GyroScroll.cpp GyroScroll.res \
- *       -luser32 -lhid -lsetupapi -lshell32 -lcomctl32 -lgdi32
+ *       -luser32 -lhid -lsetupapi -lshell32 -lcomctl32 -lgdi32 -ladvapi32
  *
- * ─── HOW CHIRAL SCROLLING WORKS ──────────────────────────────────────────────
+ * ─── HOW CIRCULAR SCROLLING WORKS ─────────────────────────────────────────────
  *
- * Instead of tracking raw pixel deltas (which requires reversal at the top/bottom),
- * we track the ANGLE of the finger relative to the touchpad centre.
+ * When a touch begins in an edge zone we track linear finger movement.
+ * Each subsequent report gives a new position; the distance moved drives
+ * scrolling. Direction is determined once at the start of each session and
+ * stored as a ±1 flag. Because the finger can circle continuously without
+ * lifting, indefinite scrolling is possible — that is the gyro part.
  *
  *   ┌──────────────────────────┐
  *   │                    │░░░│  ← right edge zone (vertical scroll)
- *   │         centre     │░░░│
- *   │           ×        │░░░│
+ *   │                    │░░░│
+ *   │                    │░░░│
  *   │                    │░░░│
  *   │░░░░░░░░░░░░░░░░░░░░░░░░│  ← bottom edge zone (horizontal scroll)
  *   └──────────────────────────┘
  *
- * When a touch begins in an edge zone we record the angle atan2(y-½, x-½).
- * Each subsequent report gives a new angle; the angular delta drives scrolling.
- * Because we track angle, the user can circle the finger continuously without
- * ever needing to lift — that is the chiral part.
+ * Three deadzones prevent noise and false direction changes:
+ *   startDeadzone   — minimum travel before scrolling begins
+ *   moveDeadzone    — minimum forward movement per report to continue scrolling
+ *   reverseDeadzone — minimum backward travel required to flip direction
  *
  * ─── SETTINGS (GyroScroll.ini, beside the exe) ─────────────────────────────
  *
  *   [GyroScroll]
- *   EdgeRight=0.08        ; right edge zone width as fraction of pad width
- *   EdgeBottom=0.08       ; bottom edge zone height as fraction of pad height
- *   SpeedV=20.0           ; vertical scroll clicks per full (360°) rotation
- *   SpeedH=20.0           ; horizontal scroll clicks per full rotation
- *   NaturalV=0            ; 1 = natural (reverse) vertical scrolling
- *   NaturalH=0            ; 1 = natural (reverse) horizontal scrolling
+ *   EdgeRight=8         ; right edge zone width as % of pad width  (e.g. 8 = 8%)
+ *   EdgeBottom=8        ; bottom edge zone height as % of pad height
+ *   SpeedV=20           ; vertical scroll clicks per full pad traversal
+ *   SpeedH=20           ; horizontal scroll clicks per full pad traversal
+ *   NaturalV=0          ; 1 = natural (reverse) vertical scrolling
+ *   NaturalH=0          ; 1 = natural (reverse) horizontal scrolling
+ *
+ * ─── AUTOSTART ───────────────────────────────────────────────────────────────
+ *
+ *   Controlled via the Settings window checkbox "Start with Windows".
+ *   Stored in: HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run
+ *   Value name: GyroScroll  (present = enabled, absent = disabled)
+ *   Not stored in the INI file.
  *
  * ─── KNOWN LIMITATIONS ───────────────────────────────────────────────────────
  *
@@ -52,8 +63,6 @@
  *   described in the ParseContacts() comments below.
  * - Tested structure against the HID descriptor in the WPT spec (v1.0).
  *   Some third-party firmware quirks may require minor adjustments.
- *
- * MIT License 2025
  */
 
 #define WIN32_LEAN_AND_MEAN
@@ -407,7 +416,7 @@ static std::vector<Contact> ParseContacts(const Touchpad& tp,
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Chiral scroll state machine
+// Circular scrolling state machine
 //
 //
 //  • Scroll amount per report = distance_moved × sensitivity
@@ -657,7 +666,7 @@ static void ShowAboutBox(HWND hwnd)
         std::wstring(header) +
         L"\n"
         L"\n"
-        L"Chiral scrolling for Precision Touchpads in Windows 10/11\n"
+        L"Circular scrolling for Precision Touchpads in Windows 10/11\n"
         L"\n"
         L"Move your finger along the right or bottom edge of your touchpad and make a circular motion for continuous scrolling, without lifting.\n"
         L"\n"
@@ -728,23 +737,25 @@ static void ShowSettingsWindow(HWND parent);
 // Layout:
 //   ┌──────────────────────────────────────────────────────┐
 //   │  [Large touchpad preview]   Edge zones               │
-//   │                             Right:   [0.08][======]  │
-//   │                             Bottom:  [0.08][======]  │
+//   │                             Right:   [8 ][======]    │
+//   │                             Bottom:  [8 ][======]    │
 //   │                                                      │
 //   │                             Scroll speed             │
 //   │                             Vertical:  [20][======]  │
 //   │                             Horizontal:[20][======]  │
 //   │                                                      │
 //   │                             Natural scroll           │
-//   │                             [x] Reverse vertical     │
-//   │                             [x] Reverse horizontal   │
+//   │                             [ ] Reverse vertical     │
+//   │                             [ ] Reverse horizontal   │
 //   │                                                      │
 //   │  Blue  = vertical zone                  [OK][Cancel] │
 //   │  Green = horizontal zone                             │
+//   │  [ ] Start with Windows                              │
 //   └──────────────────────────────────────────────────────┘
 //
 // Sliders and edit boxes are kept in sync bidirectionally.
 // The preview redraws live whenever an edge zone value changes.
+// The autostart checkbox reads/writes the registry directly (not the INI).
 // ═════════════════════════════════════════════════════════════════════════════
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -903,7 +914,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         }
 
         if (id == IDC_OK) {
-            // Edge values are entered as integers (percent × 100), e.g. "8" = 0.08
+            // Edge values are entered as integers (percent), e.g. "8" = 8% = 0.08
             float r  = GetEditFloat(hwnd, IDC_EDGE_RIGHT,  g_edgeRight  * 100.f) / 100.f;
             float b  = GetEditFloat(hwnd, IDC_EDGE_BOTTOM, g_edgeBottom * 100.f) / 100.f;
             float sv = GetEditFloat(hwnd, IDC_SPEED_V,     g_speedV);

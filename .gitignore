@@ -1,4 +1,5 @@
-*.obj 
+art/
+*.obj
 *.exe 
 *.pdb 
 *.ilk 

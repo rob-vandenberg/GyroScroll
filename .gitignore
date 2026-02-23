@@ -1,4 +1,5 @@
 art/
+backup/
 *.obj
 *.exe 
 *.pdb 

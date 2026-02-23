@@ -1,58 +1,3 @@
-/*
- * GyroScroll - Lightweight dependency-free chiral touchpad scrolling for Windows
- *
- * Uses Windows Raw HID input to read touchpad finger coordinates directly.
- * No wxWidgets, no abseil — only the Windows SDK (user32, hid, setupapi, shell32).
- *
- * ─── BUILD ────────────────────────────────────────────────────────────────────
- *
- * MSVC (from a Developer Command Prompt):
- *   cl /O2 /EHsc GyroScroll.cpp /link user32.lib hid.lib setupapi.lib shell32.lib
- *
- * MinGW-w64:
- *   g++ -O2 -mwindows -o GyroScroll.exe GyroScroll.cpp \
- *       -luser32 -lhid -lsetupapi -lshell32
- *
- * ─── HOW CHIRAL SCROLLING WORKS ──────────────────────────────────────────────
- *
- * Instead of tracking raw pixel deltas (which requires reversal at the top/bottom),
- * we track the ANGLE of the finger relative to the touchpad centre.
- *
- *   ┌──────────────────────────┐
- *   │                    │░░░│  ← right edge zone (vertical scroll)
- *   │         centre     │░░░│
- *   │           ×        │░░░│
- *   │                    │░░░│
- *   │░░░░░░░░░░░░░░░░░░░░░░░░│  ← bottom edge zone (horizontal scroll)
- *   └──────────────────────────┘
- *
- * When a touch begins in an edge zone we record the angle atan2(y-½, x-½).
- * Each subsequent report gives a new angle; the angular delta drives scrolling.
- * Because we track angle, the user can circle the finger continuously without
- * ever needing to lift — that is the chiral part.
- *
- * ─── SETTINGS (GyroScroll.ini, beside the exe) ─────────────────────────────
- *
- *   [GyroScroll]
- *   EdgeRight=0.08        ; right edge zone width as fraction of pad width
- *   EdgeBottom=0.08       ; bottom edge zone height as fraction of pad height
- *   SpeedV=20.0           ; vertical scroll clicks per full (360°) rotation
- *   SpeedH=20.0           ; horizontal scroll clicks per full rotation
- *   NaturalV=0            ; 1 = natural (reverse) vertical scrolling
- *   NaturalH=0            ; 1 = natural (reverse) horizontal scrolling
- *
- * ─── KNOWN LIMITATIONS ───────────────────────────────────────────────────────
- *
- * - Targets Windows Precision Touchpad (WPT) devices. Older Synaptics HID
- *   touchpads may use a different report descriptor layout.
- * - Logical coordinate ranges are assumed unsigned (LogicalMin = 0). Devices
- *   that report signed logical ranges will need the sign-extension workaround
- *   described in the ParseContacts() comments below.
- * - Tested structure against the HID descriptor in the WPT spec (v1.0).
- *   Some third-party firmware quirks may require minor adjustments.
- *
- * MIT License 2025
- */
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -2241,27 +2186,6 @@ static std::vector<Contact> ParseContacts(const Touchpad& tp,
     return out;
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// Chiral scroll state machine
-//
-// Algorithm matches the original ChiralScroll (chiralscroll.sourceforge.net):
-//
-//  • Scroll amount per report = distance_moved × sensitivity
-//    (pure linear distance, not angular rotation)
-//  • Scroll direction is a ±1 flag, not a geometry computation
-//  • Three deadzones gate noise without any ring-buffer smoothing:
-//      startDeadzone  — must move this far before scrolling begins
-//      moveDeadzone   — minimum projected movement to continue scrolling
-//      reverseDeadzone — must move this far backward to flip direction
-//  • Cursor freeze via WH_MOUSE_LL hook (swallows WM_MOUSEMOVE entirely)
-//
-// Positions are stored normalised 0..1 (same units as g_edgeRight/Bottom).
-// Deadzones are also in normalised units (original author used hw/1784;
-// we use equivalent fractions derived from the same calibration).
-//
-// State:  IDLE → SCROLL_V / SCROLL_H on edge touch → back to IDLE on lift.
-// ═════════════════════════════════════════════════════════════════════════════
-
 enum class ScrollMode { IDLE, SCROLL_V, SCROLL_H };
 
 static ScrollMode g_mode       = ScrollMode::IDLE;
@@ -2513,31 +2437,6 @@ static bool g_syncLock = false;
 
 static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 static void ShowSettingsWindow(HWND parent);
-
-// ═════════════════════════════════════════════════════════════════════════════
-// Settings window
-//
-// Layout:
-//   ┌──────────────────────────────────────────────────────┐
-//   │  [Large touchpad preview]   Edge zones               │
-//   │                             Right:   [0.08][======]  │
-//   │                             Bottom:  [0.08][======]  │
-//   │                                                      │
-//   │                             Scroll speed             │
-//   │                             Vertical:  [20][======]  │
-//   │                             Horizontal:[20][======]  │
-//   │                                                      │
-//   │                             Natural scroll           │
-//   │                             [x] Reverse vertical     │
-//   │                             [x] Reverse horizontal   │
-//   │                                                      │
-//   │  Blue  = vertical zone                  [OK][Cancel] │
-//   │  Green = horizontal zone                             │
-//   └──────────────────────────────────────────────────────┘
-//
-// Sliders and edit boxes are kept in sync bidirectionally.
-// The preview redraws live whenever an edge zone value changes.
-// ═════════════════════════════════════════════════════════════════════════════
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 

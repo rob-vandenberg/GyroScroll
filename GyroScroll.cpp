@@ -78,12 +78,13 @@
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "advapi32.lib")
 
 // ─── Version ──────────────────────────────────────────────────────────────────
 #define VERSION_MAJOR  0
 #define VERSION_MINOR  4
-#define VERSION_PATCH  5
-#define VERSION_STRING "0.4.5"
+#define VERSION_PATCH  7
+#define VERSION_STRING "0.4.7"
 #ifdef _WIN64
     #define BITNESS_STRING "64-bit"
 #else
@@ -1062,6 +1063,13 @@ static void ShowSettingsWindow(HWND parent)
         L"Blue  = vertical scroll zone\nGreen = horizontal scroll zone",
         COL1, PAD + PREVH + 6, PREVW, LH * 2 + 4);
 
+    // Autostart checkbox below legend (left column)
+    CreateWindowW(L"BUTTON", L"Start with Windows",
+        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        COL1, PAD + PREVH + 6 + LH * 2 + 4 + 8, PREVW, LH + 2,
+        g_settingsWnd, reinterpret_cast<HMENU>((UINT_PTR)IDC_AUTOSTART), hi, nullptr);
+    CheckDlgButton(g_settingsWnd, IDC_AUTOSTART, GetAutostart() ? BST_CHECKED : BST_UNCHECKED);
+
     // ── Right column ──────────────────────────────────────────────────────────
 
     // Section: Edge zones
@@ -1112,17 +1120,6 @@ static void ShowSettingsWindow(HWND parent)
         COL2, ry, RCOLW, LH + 2,
         g_settingsWnd, reinterpret_cast<HMENU>((UINT_PTR)IDC_NATURAL_H), hi, nullptr);
     CheckDlgButton(g_settingsWnd, IDC_NATURAL_H, g_naturalH ? BST_CHECKED : BST_UNCHECKED);
-
-    // Section: Startup
-    ry += LH + 10;
-    MakeLabel(g_settingsWnd, hi, L"Startup", COL2, ry, RCOLW, LH);
-    ry += LH + 4;
-
-    CreateWindowW(L"BUTTON", L"Start automatically with Windows",
-        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-        COL2, ry, RCOLW, LH + 2,
-        g_settingsWnd, reinterpret_cast<HMENU>((UINT_PTR)IDC_AUTOSTART), hi, nullptr);
-    CheckDlgButton(g_settingsWnd, IDC_AUTOSTART, GetAutostart() ? BST_CHECKED : BST_UNCHECKED);
 
     // ── OK / Cancel ───────────────────────────────────────────────────────────
     const int BTN_W = 82;

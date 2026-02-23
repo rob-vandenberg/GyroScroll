@@ -82,8 +82,13 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
 #define VERSION_MAJOR  0
 #define VERSION_MINOR  4
-#define VERSION_PATCH  4
-#define VERSION_STRING "0.4.4"
+#define VERSION_PATCH  5
+#define VERSION_STRING "0.4.5"
+#ifdef _WIN64
+    #define BITNESS_STRING "64-bit"
+#else
+    #define BITNESS_STRING "32-bit"
+#endif
 
 
 #define IDI_APPICON 1
@@ -645,13 +650,11 @@ static constexpr UINT  IDM_ABOUT    = 1003;
 
 static void ShowAboutBox(HWND hwnd)
 {
-#ifdef _WIN64
-    const wchar_t* bits = L"64-bit";
-#else
-    const wchar_t* bits = L"32-bit";
-#endif
+    wchar_t header[64];
+    swprintf(header, 64, L"GyroScroll %hs (%hs)", VERSION_STRING, BITNESS_STRING);
     std::wstring msg =
-        std::wstring(L"GyroScroll ") + VERSION_STRING + L" (" + bits + L")\n"
+        std::wstring(header) +
+        L"\n"
         L"\n"
         L"Chiral scrolling for Precision Touchpads in Windows 10/11\n"
         L"\n"

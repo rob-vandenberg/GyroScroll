@@ -1,8 +1,0 @@
-# GyroScrollDiag - Touchpad HID input log
-# Press any key in this window to stop.
-#
-# Total touchpads found: 0
-#
-# Columns: time_ms | msg# | slot | id | tip | x | y | dx | dy | dist
-#
-# WARNING: No Precision Touchpad found!

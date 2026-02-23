@@ -1,5 +1,6 @@
 art/
 backup/
+*.bat
 *.obj
 *.exe 
 *.pdb 

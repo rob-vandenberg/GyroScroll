@@ -1,6 +1,6 @@
 # GyroScroll
 
-**Chiral (circular) scrolling for Windows Precision Touchpads**
+**Circular scrolling for Windows Precision Touchpads**
 
 [![Version](https://img.shields.io/badge/version-0.3.3-blue.svg)](https://github.com/rob-vandenberg/gyroscroll/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows-lightgrey.svg)]()
@@ -8,9 +8,9 @@
 
 ---
 
-## What is chiral scrolling?
+## What is circular scrolling?
 
-Chiral scrolling lets you scroll continuously by moving your finger in a **circle** along the edge of your touchpad — like spinning a wheel. Once you start the circular motion, you can keep going indefinitely without ever lifting your finger.
+Circular scrolling lets you scroll continuously by moving your finger in a **circle** along the edge of your touchpad — like spinning a wheel. Once you start the circular motion, you can keep going indefinitely without ever lifting your finger.
 
 - Move your finger **up and down** along the **right edge** → vertical scroll
 - Move your finger **left and right** along the **bottom edge** → horizontal scroll
@@ -36,7 +36,7 @@ This feature was common on older Synaptics touchpads but disappeared with the in
 GyroScroll is a single portable executable — no installer needed.
 
 1. Download `GyroScroll.exe` from the [Releases](https://github.com/rob-vandenberg/gyroscroll/releases) page
-2. Copy it to any folder you like (e.g. `C:\Tools\GyroScroll\`)
+2. Copy it to any folder you like (e.g. `C:\Program Files\GyroScroll\GyroScroll.exe`)
 3. Double-click to run — a small icon appears in the system tray
 
 That's it. GyroScroll is now active.
@@ -45,8 +45,7 @@ That's it. GyroScroll is now active.
 
 To have GyroScroll start automatically with Windows:
 
-1. Press `Win + R`, type `shell:startup`, press Enter
-2. Create a shortcut to `GyroScroll.exe` in the folder that opens
+1. Open the GyroScroll settings window and enable the option "Start with Windows".
 
 ---
 
@@ -119,8 +118,8 @@ Settings are stored in `GyroScroll.ini` in the same folder as the executable. Yo
 
 ```ini
 [GyroScroll]
-EdgeRight=0.08
-EdgeBottom=0.08
+EdgeRight=8
+EdgeBottom=8
 SpeedV=20
 SpeedH=20
 NaturalV=0
@@ -148,13 +147,6 @@ If you see "GyroScroll is already running", check the system tray — it's alrea
 
 ---
 
-## Acknowledgements
+## Copyright
 
-Scroll algorithm inspired by [ChiralScroll](https://chiralscroll.sourceforge.net) by Derek Brown, used under the MIT License.
-
----
-
-## License
-
-GyroScroll is released under the [MIT License](LICENSE.txt).  
-Copyright © 2025 rob-vandenberg
+Copyright © 2025 Rob Vandenberg

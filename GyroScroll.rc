@@ -1,0 +1,4 @@
+// GyroScroll resource script
+#include <windows.h>
+
+1 ICON "GyroScroll.ico"

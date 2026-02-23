@@ -81,9 +81,9 @@
 
 // ─── Version ──────────────────────────────────────────────────────────────────
 #define VERSION_MAJOR  0
-#define VERSION_MINOR  3
-#define VERSION_PATCH  12
-#define VERSION_STRING "0.3.12"
+#define VERSION_MINOR  4
+#define VERSION_PATCH  3
+#define VERSION_STRING "0.4.3"
 
 
 #define IDI_APPICON 1
@@ -411,7 +411,7 @@ static std::vector<Contact> ParseContacts(const Touchpad& tp,
 //      startDeadzone  — must move this far before scrolling begins
 //      moveDeadzone   — minimum projected movement to continue scrolling
 //      reverseDeadzone — must move this far backward to flip direction
-//  • Cursor freeze via WH_MOUSE_LL hook (swallows WM_MOUSEMOVE entirely)
+//  • Cursor freeze via ClipCursor (replaces WH_MOUSE_LL to avoid W11 lag)
 //
 // Positions are stored normalised 0..1 (same units as g_edgeRight/Bottom).
 // Deadzones are also in normalised units (original author used hw/1784;
@@ -444,29 +444,25 @@ static constexpr float DZ_REVERSE       = 0.0112f;
 static constexpr float DZ_START_ANGLE   = 3.14159f / 4.0f;  // 45°
 static constexpr float DZ_REVERSE_ANGLE = 3.14159f;         // 180°
 
-// WH_MOUSE_LL hook handle — installed while a scroll session is active to
-// swallow WM_MOUSEMOVE events, preventing cursor drift.
-static HHOOK g_mouseHook = nullptr;
+// Cursor freeze via ClipCursor — confines cursor to a 1×1 pixel rectangle
+// at its current position while a scroll session is active, preventing drift.
+// This avoids WH_MOUSE_LL which causes severe lag on Windows 11 due to its
+// strict low-level hook timeout enforcement at high touchpad report rates.
 
-static LRESULT CALLBACK MouseHookProc(int nCode, WPARAM wParam, LPARAM lParam)
-{
-    if (nCode == HC_ACTION && wParam == WM_MOUSEMOVE)
-        return 1;  // swallow — don't pass to next hook
-    return CallNextHookEx(nullptr, nCode, wParam, lParam);
-}
+static constexpr UINT SCROLL_TIMER_ID = 1;
+static constexpr UINT SCROLL_TIMER_MS = 16;  // ~60Hz flush rate
 
 static void StartScrollFreeze()
 {
-    if (!g_mouseHook)
-        g_mouseHook = SetWindowsHookExW(WH_MOUSE_LL, MouseHookProc, nullptr, 0);
+    POINT pt;
+    GetCursorPos(&pt);
+    RECT r = { pt.x, pt.y, pt.x + 1, pt.y + 1 };
+    ClipCursor(&r);
 }
 
 static void StopScrollFreeze()
 {
-    if (g_mouseHook) {
-        UnhookWindowsHookEx(g_mouseHook);
-        g_mouseHook = nullptr;
-    }
+    ClipCursor(nullptr);
 }
 
 // Unsigned angle between two vectors. Returns π/2 if either vector is near-zero
@@ -531,13 +527,14 @@ static void OnContacts(const std::vector<Contact>& contacts)
         if (c.id == g_trackId) { tr = &c; break; }
 
     if (!tr || !tr->tip) {
-        // Finger lifted — end session, flush any remaining accumulator
+        // Finger lifted — flush accumulator immediately on release
         if (g_accumScroll != 0.f) {
             int units = (int)(g_accumScroll * WHEEL_DELTA);
             if (units) SendScrollUnits(units, g_mode == ScrollMode::SCROLL_V);
         }
-        g_mode    = ScrollMode::IDLE;
-        g_trackId = 0xFFFFFFFF;
+        g_mode       = ScrollMode::IDLE;
+        g_trackId    = 0xFFFFFFFF;
+        g_accumScroll= 0.f;
         StopScrollFreeze();
         return;
     }
@@ -594,12 +591,8 @@ static void OnContacts(const std::vector<Contact>& contacts)
     float clicks = g_scrollDir * dist * speed;
     if (natural) clicks = -clicks;
 
+    // Accumulate — timer flushes at ~60Hz
     g_accumScroll += clicks;
-    int units = (int)(g_accumScroll * WHEEL_DELTA);
-    if (units != 0) {
-        SendScrollUnits(units, isV);
-        g_accumScroll -= (float)units / WHEEL_DELTA;
-    }
 
     // Update position and direction (unit vector of actual movement)
     g_posX = tr->x;
@@ -1163,11 +1156,25 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_CREATE:
         BuildTouchpadList(hwnd);
         AddTrayIcon(hwnd);
+        SetTimer(hwnd, SCROLL_TIMER_ID, SCROLL_TIMER_MS, nullptr);
+        return 0;
+
+    case WM_TIMER:
+        if (wp == SCROLL_TIMER_ID && g_mode != ScrollMode::IDLE) {
+            bool isV = (g_mode == ScrollMode::SCROLL_V);
+            int units = (int)(g_accumScroll * WHEEL_DELTA);
+            if (units != 0) {
+                SendScrollUnits(units, isV);
+                g_accumScroll -= (float)units / WHEEL_DELTA;
+            }
+        }
         return 0;
 
     case WM_INPUT:
+        // Process every message so direction tracking sees the full finger path.
+        // Scroll output is throttled separately via WM_TIMER.
         ProcessRawInput(reinterpret_cast<HRAWINPUT>(lp));
-        return DefWindowProcW(hwnd, msg, wp, lp);  // must pass to DefWindowProc
+        return DefWindowProcW(hwnd, msg, wp, lp);
 
     case WM_TRAY:
         if (lp == WM_RBUTTONUP || lp == WM_CONTEXTMENU)
@@ -1187,6 +1194,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
 
     case WM_DESTROY:
+        KillTimer(hwnd, SCROLL_TIMER_ID);
         StopScrollFreeze();
         SaveSettings();
         RemoveTrayIcon();

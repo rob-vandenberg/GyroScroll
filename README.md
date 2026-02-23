@@ -3,9 +3,8 @@
 **Circular scrolling for Windows Precision Touchpads**
 
 [![Version](https://img.shields.io/badge/version-0.4.7-blue.svg)](https://github.com/rob-vandenberg/gyroscroll/releases)
-[![Platform](https://img.shields.io/badge/platform-Windows-lightgrey.svg)]()
-![Windows 10](https://img.shields.io/badge/Windows%2010-0078D6?logo=windows&logoColor=white)
-![Windows 11](https://img.shields.io/badge/Windows%2011-0078D4?logo=windows11&logoColor=white)
+![Windows 10](https://img.shields.io/badge/platform-Windows%2010-0078D6?logo=windows&logoColor=white)
+![Windows 11](https://img.shields.io/badge/platform-Windows%2011-0078D4?logo=windows11&logoColor=white)
 ---
 
 ## What is circular scrolling?

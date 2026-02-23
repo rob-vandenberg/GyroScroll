@@ -8,7 +8,7 @@
  *
  * MSVC (from a Developer Command Prompt):
  *   rc.exe GyroScroll.rc
- *   cl /O2 /EHsc GyroScroll.cpp GyroScroll.res /link user32.lib hid.lib setupapi.lib shell32.lib comctl32.lib gdi32.lib
+ *   cl /O2 /EHsc GyroScroll.cpp GyroScroll.res /link user32.lib hid.lib setupapi.lib shell32.lib comctl32.lib gdi32.lib advapi32.lib
  *
  * MinGW-w64:
  *   windres GyroScroll.rc -o GyroScroll.res
@@ -82,8 +82,8 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
 #define VERSION_MAJOR  0
 #define VERSION_MINOR  4
-#define VERSION_PATCH  3
-#define VERSION_STRING "0.4.3"
+#define VERSION_PATCH  4
+#define VERSION_STRING "0.4.4"
 
 
 #define IDI_APPICON 1
@@ -645,17 +645,22 @@ static constexpr UINT  IDM_ABOUT    = 1003;
 
 static void ShowAboutBox(HWND hwnd)
 {
-    MessageBoxW(hwnd,
-        L"GyroScroll " VERSION_STRING L"\n"
+#ifdef _WIN64
+    const wchar_t* bits = L"64-bit";
+#else
+    const wchar_t* bits = L"32-bit";
+#endif
+    std::wstring msg =
+        std::wstring(L"GyroScroll ") + VERSION_STRING + L" (" + bits + L")\n"
         L"\n"
-        L"Chiral scrolling for Precision Touchpads in Windows 10\n"
+        L"Chiral scrolling for Precision Touchpads in Windows 10/11\n"
         L"\n"
         L"Move your finger along the right or bottom edge of your touchpad and make a circular motion for continuous scrolling, without lifting.\n"
         L"\n"
         L"Copyright \u00A9 2025 Rob Vandenberg\n"
         L"\n"
-        L"https://github.com/rob-vandenberg/gyroscroll",
-        L"About GyroScroll", MB_OK | MB_ICONINFORMATION);
+        L"https://github.com/rob-vandenberg/gyroscroll";
+    MessageBoxW(hwnd, msg.c_str(), L"About GyroScroll", MB_OK | MB_ICONINFORMATION);
 }
 
 // Settings dialog control IDs
@@ -672,11 +677,43 @@ static constexpr UINT IDC_SLD_EDGE_R    = 2010;  // slider for right edge
 static constexpr UINT IDC_SLD_EDGE_B    = 2011;  // slider for bottom edge
 static constexpr UINT IDC_SLD_SPEED_V   = 2012;  // slider for vertical speed
 static constexpr UINT IDC_SLD_SPEED_H   = 2013;  // slider for horizontal speed
+static constexpr UINT IDC_AUTOSTART     = 2014;  // checkbox
 
 static HWND g_settingsWnd = nullptr;
 
 // Prevent re-entrant edit↔slider sync
 static bool g_syncLock = false;
+
+// ─── Autostart registry helpers ───────────────────────────────────────────────
+static const wchar_t* RUN_KEY = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+static const wchar_t* RUN_VAL = L"GyroScroll";
+
+static bool GetAutostart()
+{
+    HKEY hk;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY, 0, KEY_READ, &hk) != ERROR_SUCCESS)
+        return false;
+    bool present = (RegQueryValueExW(hk, RUN_VAL, nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS);
+    RegCloseKey(hk);
+    return present;
+}
+
+static void SetAutostart(bool enable)
+{
+    HKEY hk;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY, 0, KEY_SET_VALUE, &hk) != ERROR_SUCCESS)
+        return;
+    if (enable) {
+        wchar_t path[MAX_PATH];
+        GetModuleFileNameW(nullptr, path, MAX_PATH);
+        RegSetValueExW(hk, RUN_VAL, 0, REG_SZ,
+            reinterpret_cast<const BYTE*>(path),
+            (DWORD)((wcslen(path) + 1) * sizeof(wchar_t)));
+    } else {
+        RegDeleteValueW(hk, RUN_VAL);
+    }
+    RegCloseKey(hk);
+}
 
 static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 static void ShowSettingsWindow(HWND parent);
@@ -877,6 +914,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
             g_speedH     = sh;
             g_naturalV   = (IsDlgButtonChecked(hwnd, IDC_NATURAL_V) == BST_CHECKED);
             g_naturalH   = (IsDlgButtonChecked(hwnd, IDC_NATURAL_H) == BST_CHECKED);
+            SetAutostart(IsDlgButtonChecked(hwnd, IDC_AUTOSTART) == BST_CHECKED);
             SaveSettings();
             DestroyWindow(hwnd);
         }
@@ -1002,7 +1040,7 @@ static void ShowSettingsWindow(HWND parent)
     const int WH = adj.bottom - adj.top;
 
     g_settingsWnd = CreateWindowW(
-        L"GyroScrollSettings_v1", L"GyroScroll " VERSION_STRING L" Settings (GyroScroll.ini)",
+        L"GyroScrollSettings_v1", L"GyroScroll Settings (GyroScroll.ini)",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
         CW_USEDEFAULT, CW_USEDEFAULT, WW, WH,
         parent, nullptr, hi, nullptr);
@@ -1071,6 +1109,17 @@ static void ShowSettingsWindow(HWND parent)
         COL2, ry, RCOLW, LH + 2,
         g_settingsWnd, reinterpret_cast<HMENU>((UINT_PTR)IDC_NATURAL_H), hi, nullptr);
     CheckDlgButton(g_settingsWnd, IDC_NATURAL_H, g_naturalH ? BST_CHECKED : BST_UNCHECKED);
+
+    // Section: Startup
+    ry += LH + 10;
+    MakeLabel(g_settingsWnd, hi, L"Startup", COL2, ry, RCOLW, LH);
+    ry += LH + 4;
+
+    CreateWindowW(L"BUTTON", L"Start automatically with Windows",
+        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        COL2, ry, RCOLW, LH + 2,
+        g_settingsWnd, reinterpret_cast<HMENU>((UINT_PTR)IDC_AUTOSTART), hi, nullptr);
+    CheckDlgButton(g_settingsWnd, IDC_AUTOSTART, GetAutostart() ? BST_CHECKED : BST_UNCHECKED);
 
     // ── OK / Cancel ───────────────────────────────────────────────────────────
     const int BTN_W = 82;

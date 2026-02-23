@@ -7,11 +7,13 @@
  * ─── BUILD ────────────────────────────────────────────────────────────────────
  *
  * MSVC (from a Developer Command Prompt):
- *   cl /O2 /EHsc GyroScroll.cpp /link user32.lib hid.lib setupapi.lib shell32.lib
+ *   rc.exe GyroScroll.rc
+ *   cl /O2 /EHsc GyroScroll.cpp GyroScroll.res /link user32.lib hid.lib setupapi.lib shell32.lib comctl32.lib gdi32.lib
  *
  * MinGW-w64:
- *   g++ -O2 -mwindows -o GyroScroll.exe GyroScroll.cpp \
- *       -luser32 -lhid -lsetupapi -lshell32
+ *   windres GyroScroll.rc -o GyroScroll.res
+ *   g++ -O2 -mwindows -o GyroScroll.exe GyroScroll.cpp GyroScroll.res \
+ *       -luser32 -lhid -lsetupapi -lshell32 -lcomctl32 -lgdi32
  *
  * ─── HOW CHIRAL SCROLLING WORKS ──────────────────────────────────────────────
  *
@@ -80,11 +82,11 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
 #define VERSION_MAJOR  0
 #define VERSION_MINOR  3
-#define VERSION_PATCH  4
-#define VERSION_STRING "0.3.4"
+#define VERSION_PATCH  12
+#define VERSION_STRING "0.3.12"
 
 
-#include "GyroScroll.h"
+#define IDI_APPICON 1
 
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -401,7 +403,6 @@ static std::vector<Contact> ParseContacts(const Touchpad& tp,
 // ═════════════════════════════════════════════════════════════════════════════
 // Chiral scroll state machine
 //
-// Algorithm based on the original ChiralScroll by Derek Brown (see CREDITS.md):
 //
 //  • Scroll amount per report = distance_moved × sensitivity
 //    (pure linear distance, not angular rotation)
@@ -647,6 +648,22 @@ static NOTIFYICONDATAW g_nid    = {};
 static constexpr UINT  WM_TRAY      = WM_USER + 1;
 static constexpr UINT  IDM_QUIT     = 1001;
 static constexpr UINT  IDM_SETTINGS = 1002;
+static constexpr UINT  IDM_ABOUT    = 1003;
+
+static void ShowAboutBox(HWND hwnd)
+{
+    MessageBoxW(hwnd,
+        L"GyroScroll " VERSION_STRING L"\n"
+        L"\n"
+        L"Chiral scrolling for Precision Touchpads in Windows 10\n"
+        L"\n"
+        L"Move your finger along the right or bottom edge of your touchpad and make a circular motion for continuous scrolling, without lifting.\n"
+        L"\n"
+        L"Copyright \u00A9 2025 Rob Vandenberg\n"
+        L"\n"
+        L"https://github.com/rob-vandenberg/gyroscroll",
+        L"About GyroScroll", MB_OK | MB_ICONINFORMATION);
+}
 
 // Settings dialog control IDs
 static constexpr UINT IDC_EDGE_RIGHT    = 2001;  // edit
@@ -992,7 +1009,7 @@ static void ShowSettingsWindow(HWND parent)
     const int WH = adj.bottom - adj.top;
 
     g_settingsWnd = CreateWindowW(
-        L"GyroScrollSettings_v1", L"GyroScroll Settings",
+        L"GyroScrollSettings_v1", L"GyroScroll " VERSION_STRING L" Settings (GyroScroll.ini)",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
         CW_USEDEFAULT, CW_USEDEFAULT, WW, WH,
         parent, nullptr, hi, nullptr);
@@ -1098,30 +1115,6 @@ static void ShowSettingsWindow(HWND parent)
     RefreshPreview(g_settingsWnd);
 }
 
-// Load a specific size from the embedded ICO byte array.
-// ICO format: 6-byte header, then 16-byte entries, then image data.
-static HICON LoadEmbeddedIcon(int desiredSize)
-{
-    const BYTE* p = kIconData;
-    int count = *(WORD*)(p + 4);
-    HICON best = nullptr;
-    int bestDiff = 9999;
-    for (int i = 0; i < count; i++) {
-        const BYTE* e = p + 6 + i * 16;
-        int w = e[0] ? e[0] : 256;  // 0 means 256 in ICO format
-        int diff = abs(w - desiredSize);
-        if (diff < bestDiff) {
-            bestDiff = diff;
-            DWORD size   = *(DWORD*)(e + 8);
-            DWORD offset = *(DWORD*)(e + 12);
-            best = CreateIconFromResourceEx(
-                (PBYTE)(kIconData + offset), size,
-                TRUE, 0x00030000, w, w, LR_DEFAULTCOLOR);
-        }
-    }
-    return best;
-}
-
 static void AddTrayIcon(HWND hwnd)
 {
     g_nid.cbSize           = sizeof(g_nid);
@@ -1129,7 +1122,11 @@ static void AddTrayIcon(HWND hwnd)
     g_nid.uID              = 1;
     g_nid.uFlags           = NIF_ICON | NIF_TIP | NIF_MESSAGE;
     g_nid.uCallbackMessage = WM_TRAY;
-    g_nid.hIcon            = LoadEmbeddedIcon(GetSystemMetrics(SM_CXSMICON));
+    g_nid.hIcon            = (HICON)LoadImageW(GetModuleHandleW(nullptr),
+                                 MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON,
+                                 GetSystemMetrics(SM_CXSMICON),
+                                 GetSystemMetrics(SM_CYSMICON),
+                                 LR_DEFAULTCOLOR);
 
     wcscpy_s(g_nid.szTip, L"GyroScroll — right/bottom edge to scroll");
     Shell_NotifyIconW(NIM_ADD, &g_nid);
@@ -1143,11 +1140,11 @@ static void RemoveTrayIcon()
 static void ShowContextMenu(HWND hwnd)
 {
     HMENU menu = CreatePopupMenu();
-    AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"GyroScroll");
+    AppendMenuW(menu, MF_STRING, IDM_ABOUT,    L"&GyroScroll...");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, IDM_SETTINGS, L"&Settings...");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, IDM_QUIT, L"&Quit");
+    AppendMenuW(menu, MF_STRING, IDM_QUIT,     L"&Quit");
     POINT pt;
     GetCursorPos(&pt);
     SetForegroundWindow(hwnd);   // required for TrackPopupMenu to close correctly
@@ -1180,6 +1177,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
 
     case WM_COMMAND:
+        if (LOWORD(wp) == IDM_ABOUT)    ShowAboutBox(hwnd);
         if (LOWORD(wp) == IDM_SETTINGS) ShowSettingsWindow(hwnd);
         if (LOWORD(wp) == IDM_QUIT) {
             SaveSettings();
@@ -1220,7 +1218,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
     WNDCLASSW wc     = {};
     wc.lpfnWndProc   = WndProc;
     wc.hInstance     = hInst;
-    wc.hIcon         = LoadEmbeddedIcon(GetSystemMetrics(SM_CXICON));
+    wc.hIcon         = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_APPICON));
     wc.lpszClassName = L"GyroScrollWnd_v1";
     if (!RegisterClassW(&wc)) {
         MessageBoxW(nullptr, L"Failed to register window class.", L"GyroScroll", MB_ICONERROR);

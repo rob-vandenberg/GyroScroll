@@ -4,7 +4,6 @@
 
 [![Version](https://img.shields.io/badge/version-0.4.7-blue.svg)](https://github.com/rob-vandenberg/gyroscroll/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows-lightgrey.svg)]()
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE.txt)
 
 ---
 

@@ -46,8 +46,6 @@
  *   SpeedH=20           ; horizontal scroll clicks per full pad traversal
  *   NaturalV=0          ; 1 = natural (reverse) vertical scrolling
  *   NaturalH=0          ; 1 = natural (reverse) horizontal scrolling
- *   Sensitivity=11      ; direction flip sensitivity (× 1000 internally, e.g. 11 = 0.011)
- *                       ; UI range is 1–30; values beyond 30 are accepted for fine-tuning
  *
  * ─── AUTOSTART ───────────────────────────────────────────────────────────────
  *
@@ -93,9 +91,9 @@
 
 // ─── Version ──────────────────────────────────────────────────────────────────
 #define VERSION_MAJOR  0
-#define VERSION_MINOR  5
-#define VERSION_PATCH  46
-#define VERSION_STRING "0.5.46"
+#define VERSION_MINOR  4
+#define VERSION_PATCH  7
+#define VERSION_STRING "0.4.7"
 #ifdef _WIN64
     #define BITNESS_STRING "64-bit"
 #else
@@ -103,11 +101,7 @@
 #endif
 
 
-#define IDI_APPICON   1
-#define IDD_SETTINGS  101
-#define IDD_ABOUT     102
-#define IDC_VERSION   200
-#define IDC_LINK_URL  201
+#define IDI_APPICON 1
 
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -127,13 +121,12 @@ static constexpr USAGE U_Y          = 0x31;   // Y coordinate
 // Settings  (loaded from / saved to GyroScroll.ini beside the .exe)
 // ═════════════════════════════════════════════════════════════════════════════
 
-static float g_edgeRight        = 0.06f;   // right edge zone, fraction of pad width
-static float g_edgeBottom       = 0.06f;   // bottom edge zone, fraction of pad height
-static float g_speedV           = 16.0f;   // wheel clicks per full pad traversal, vertical
-static float g_speedH           = 16.0f;   // wheel clicks per full pad traversal, horizontal
-static bool  g_naturalV         = false;   // reverse vertical scroll direction
-static bool  g_naturalH         = false;   // reverse horizontal scroll direction
-static float g_reverseThreshold = 0.012f;  // backward travel required to flip direction
+static float g_edgeRight  = 0.08f;   // right edge zone, fraction of pad width
+static float g_edgeBottom = 0.08f;   // bottom edge zone, fraction of pad height
+static float g_speedV     = 20.0f;   // wheel clicks per full (360°) rotation, vertical
+static float g_speedH     = 20.0f;   // wheel clicks per full rotation, horizontal
+static bool  g_naturalV   = false;   // reverse vertical scroll direction
+static bool  g_naturalH   = false;   // reverse horizontal scroll direction
 
 static std::wstring g_iniPath;
 
@@ -157,28 +150,24 @@ static void LoadSettings()
     g_speedH     = rf(L"SpeedH",     g_speedH);
     g_naturalV   = rb(L"NaturalV",   g_naturalV);
     g_naturalH   = rb(L"NaturalH",   g_naturalH);
-    g_reverseThreshold = rf(L"Sensitivity", g_reverseThreshold * 1000.f) / 1000.f;
 }
 
 static void SaveSettings()
 {
     const wchar_t* S = L"GyroScroll";
-    auto wi = [&](const wchar_t* k, int v) {
-        wchar_t buf[16];
-        swprintf_s(buf, L"%d", v);
-        WritePrivateProfileStringW(S, k, buf, g_iniPath.c_str());
+    auto wf = [&](const wchar_t* k, float v) {
+        WritePrivateProfileStringW(S, k, std::to_wstring(v).c_str(), g_iniPath.c_str());
     };
     auto wb = [&](const wchar_t* k, bool v) {
         WritePrivateProfileStringW(S, k, v ? L"1" : L"0", g_iniPath.c_str());
     };
-    // All values stored as plain integers (e.g. 0.08 → 8, 0.011 → 11)
-    wi(L"EdgeRight",   (int)(g_edgeRight        * 100.f  + 0.5f));
-    wi(L"EdgeBottom",  (int)(g_edgeBottom        * 100.f  + 0.5f));
-    wi(L"SpeedV",      (int)(g_speedV                     + 0.5f));
-    wi(L"SpeedH",      (int)(g_speedH                     + 0.5f));
-    wb(L"NaturalV",    g_naturalV);
-    wb(L"NaturalH",    g_naturalH);
-    wi(L"Sensitivity", (int)(g_reverseThreshold  * 1000.f + 0.5f));
+    // Edge zones stored as integers in INI (e.g. 0.08 → 8)
+    wf(L"EdgeRight",  (float)(int)(g_edgeRight  * 100.f + 0.5f));
+    wf(L"EdgeBottom", (float)(int)(g_edgeBottom * 100.f + 0.5f));
+    wf(L"SpeedV",     g_speedV);
+    wf(L"SpeedH",     g_speedH);
+    wb(L"NaturalV",   g_naturalV);
+    wb(L"NaturalH",   g_naturalH);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -461,7 +450,7 @@ static float g_accumScroll = 0.f;  // fractional wheel-click accumulator
 
 // Deadzone constants (normalised, derived from original's hw/1784 baseline).
 // startDeadzone & moveDeadzone = 10/1784 ≈ 0.0056
-// reverseDeadzone default      = 11/1000 = 0.011  (now user-configurable via g_reverseThreshold)
+// reverseDeadzone              = 20/1784 ≈ 0.0112
 // startDeadzoneAngle           = π/4 (45°) — cone within which start is allowed
 // reverseDeadzoneAngle         = π   (180°) — effectively any backward movement
 static constexpr float DZ_START         = 0.0056f;
@@ -594,7 +583,7 @@ static void OnContacts(const std::vector<Contact>& contacts)
     // Check for direction reversal: movement must be backward within the
     // reverseDeadzoneAngle cone AND exceed reverseDeadzone distance.
     if (AngleBetween(g_dirX, g_dirY, -nx, -ny) < DZ_REVERSE_ANGLE/2.f) {
-        if (dist > g_reverseThreshold) {
+        if (dist > DZ_REVERSE) {
             g_scrollDir *= -1.f;
             // fall through — scroll with new direction, then update state
         } else {
@@ -669,131 +658,22 @@ static constexpr UINT  IDM_QUIT     = 1001;
 static constexpr UINT  IDM_SETTINGS = 1002;
 static constexpr UINT  IDM_ABOUT    = 1003;
 
-static HWND g_aboutWnd = nullptr;
-
-// ─── About dialog ──────────────────────────────────────────────────────────────
-// The GitHub link is a STATIC with SS_NOTIFY (proven reliable).
-// Its underline font is stored in the control's own GWLP_USERDATA — no global.
-// The hand cursor requires subclassing: STATIC handles WM_SETCURSOR itself and
-// sets the arrow cursor before the message ever reaches the dialog proc.
-
-static LRESULT CALLBACK LinkCursorProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
-    UINT_PTR, DWORD_PTR)
-{
-    if (msg == WM_SETCURSOR) { SetCursor(LoadCursorW(nullptr, (LPCWSTR)IDC_HAND)); return TRUE; }
-    return DefSubclassProc(hwnd, msg, wp, lp);
-}
-
-static INT_PTR CALLBACK AboutDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
-{
-    switch (msg)
-    {
-    case WM_INITDIALOG:
-    {
-        HINSTANCE hi  = GetModuleHandleW(nullptr);
-        HFONT font    = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-        const int PAD = 14, ICON_W = 32, W = 400, LH = 16;
-        const int TX  = PAD + ICON_W + PAD;   // text column x
-        const int TW  = W - TX - PAD;         // text column width
-        int y = PAD;
-
-        // Information icon — placed manually, so no MessageBox ding
-        HWND hIco = CreateWindowW(L"STATIC", nullptr,
-            WS_CHILD | WS_VISIBLE | SS_ICON,
-            PAD, PAD, ICON_W, ICON_W, hwnd, nullptr, hi, nullptr);
-        SendMessageW(hIco, STM_SETICON,
-            (WPARAM)LoadIconW(nullptr, (LPCWSTR)IDI_INFORMATION), 0);
-
-        // Helper: create a plain text STATIC, apply font, advance y
-        auto addLine = [&](const wchar_t* txt, int h) {
-            HWND hw = CreateWindowW(L"STATIC", txt,
-                WS_CHILD | WS_VISIBLE | SS_LEFT,
-                TX, y, TW, h, hwnd, nullptr, hi, nullptr);
-            SendMessageW(hw, WM_SETFONT, (WPARAM)font, TRUE);
-            y += h + 6;
-        };
-
-        wchar_t hdr[64];
-        swprintf_s(hdr, L"GyroScroll %hs (%hs)", VERSION_STRING, BITNESS_STRING);
-        addLine(hdr, LH);
-        addLine(L"Circular scrolling for Precision Touchpads in Windows 10/11", LH);
-        addLine(L"Move your finger along the right or bottom edge of your touchpad "
-                L"and make a circular motion for continuous scrolling, without lifting.",
-                LH * 2 + 4);
-        addLine(L"Copyright \u00A9 2025 Rob Vandenberg", LH);
-
-        // Clickable link — STATIC with SS_NOTIFY.
-        // Underline font is stored in GWLP_USERDATA on the control; freed in WM_DESTROY.
-        LOGFONTW lf = {};
-        GetObjectW(font, sizeof(lf), &lf);
-        lf.lfUnderline = TRUE;
-        HFONT linkFont = CreateFontIndirectW(&lf);
-
-        HWND hLink = CreateWindowW(L"STATIC",
-            L"https://github.com/rob-vandenberg/gyroscroll",
-            WS_CHILD | WS_VISIBLE | SS_NOTIFY | SS_LEFT,
-            TX, y, TW, LH + 4, hwnd,
-            reinterpret_cast<HMENU>((UINT_PTR)IDC_LINK_URL), hi, nullptr);
-        SendMessageW(hLink, WM_SETFONT, (WPARAM)linkFont, TRUE);
-        SetWindowLongPtrW(hLink, GWLP_USERDATA, (LONG_PTR)linkFont);
-        SetWindowSubclass(hLink, LinkCursorProc, 0, 0);
-        y += LH + 4 + PAD;
-
-        const int BTN_W = 80, BTN_H = 24;
-        HWND hOk = CreateWindowW(L"BUTTON", L"OK",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-            (W - BTN_W) / 2, y, BTN_W, BTN_H,
-            hwnd, reinterpret_cast<HMENU>((UINT_PTR)IDOK), hi, nullptr);
-        SendMessageW(hOk, WM_SETFONT, (WPARAM)font, TRUE);
-        y += BTN_H + PAD;
-
-        RECT adj = { 0, 0, W, y };
-        AdjustWindowRect(&adj, WS_CAPTION | WS_SYSMENU, FALSE);
-        int ww = adj.right - adj.left, wh = adj.bottom - adj.top;
-        SetWindowPos(hwnd, nullptr,
-            (GetSystemMetrics(SM_CXSCREEN) - ww) / 2,
-            (GetSystemMetrics(SM_CYSCREEN) - wh) / 2,
-            ww, wh, SWP_NOZORDER);
-        return TRUE;
-    }
-    case WM_CTLCOLORSTATIC:
-        // Colour the link blue; leave all other statics at default
-        if (GetDlgCtrlID((HWND)lp) == IDC_LINK_URL) {
-            SetTextColor((HDC)wp, RGB(0, 102, 204));
-            SetBkMode((HDC)wp, TRANSPARENT);
-            return (INT_PTR)GetStockObject(NULL_BRUSH);
-        }
-        return FALSE;
-    case WM_COMMAND:
-        if (LOWORD(wp) == IDOK) DestroyWindow(hwnd);
-        if (LOWORD(wp) == IDC_LINK_URL && HIWORD(wp) == STN_CLICKED)
-            ShellExecuteW(hwnd, L"open",
-                L"https://github.com/rob-vandenberg/gyroscroll",
-                nullptr, nullptr, SW_SHOWNORMAL);
-        return TRUE;
-    case WM_CLOSE:
-        DestroyWindow(hwnd);
-        return TRUE;
-    case WM_DESTROY:
-    {
-        // Retrieve and free the underline font stored on the link control
-        HWND hLink = GetDlgItem(hwnd, IDC_LINK_URL);
-        if (hLink) {
-            HFONT lf = (HFONT)GetWindowLongPtrW(hLink, GWLP_USERDATA);
-            if (lf) DeleteObject(lf);
-        }
-        g_aboutWnd = nullptr;
-        return TRUE;
-    }
-    }
-    return FALSE;
-}
-
 static void ShowAboutBox(HWND hwnd)
 {
-    if (g_aboutWnd) { SetForegroundWindow(g_aboutWnd); return; }
-    g_aboutWnd = CreateDialogW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_ABOUT), hwnd, AboutDlgProc);
-    if (g_aboutWnd) { ShowWindow(g_aboutWnd, SW_SHOW); UpdateWindow(g_aboutWnd); }
+    wchar_t header[64];
+    swprintf(header, 64, L"GyroScroll %hs (%hs)", VERSION_STRING, BITNESS_STRING);
+    std::wstring msg =
+        std::wstring(header) +
+        L"\n"
+        L"\n"
+        L"Circular scrolling for Precision Touchpads in Windows 10/11\n"
+        L"\n"
+        L"Move your finger along the right or bottom edge of your touchpad and make a circular motion for continuous scrolling, without lifting.\n"
+        L"\n"
+        L"Copyright \u00A9 2025 Rob Vandenberg\n"
+        L"\n"
+        L"https://github.com/rob-vandenberg/gyroscroll";
+    MessageBoxW(hwnd, msg.c_str(), L"About GyroScroll", MB_OK | MB_ICONINFORMATION);
 }
 
 // Settings dialog control IDs
@@ -803,14 +683,14 @@ static constexpr UINT IDC_SPEED_V       = 2003;  // edit
 static constexpr UINT IDC_SPEED_H       = 2004;  // edit
 static constexpr UINT IDC_NATURAL_V     = 2005;  // checkbox
 static constexpr UINT IDC_NATURAL_H     = 2006;  // checkbox
+static constexpr UINT IDC_OK            = 2007;
+static constexpr UINT IDC_CANCEL        = 2008;
 static constexpr UINT IDC_PREVIEW       = 2009;  // owner-drawn preview panel
 static constexpr UINT IDC_SLD_EDGE_R    = 2010;  // slider for right edge
 static constexpr UINT IDC_SLD_EDGE_B    = 2011;  // slider for bottom edge
 static constexpr UINT IDC_SLD_SPEED_V   = 2012;  // slider for vertical speed
-static constexpr UINT IDC_SLD_SPEED_H     = 2013;  // slider for horizontal speed
-static constexpr UINT IDC_AUTOSTART       = 2014;  // checkbox
-static constexpr UINT IDC_REVERSE_THRESH  = 2015;  // edit  — flip sensitivity
-static constexpr UINT IDC_SLD_REVERSE_T   = 2016;  // slider — flip sensitivity
+static constexpr UINT IDC_SLD_SPEED_H   = 2013;  // slider for horizontal speed
+static constexpr UINT IDC_AUTOSTART     = 2014;  // checkbox
 
 static HWND g_settingsWnd = nullptr;
 
@@ -848,14 +728,8 @@ static void SetAutostart(bool enable)
     RegCloseKey(hk);
 }
 
-static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
+static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 static void ShowSettingsWindow(HWND parent);
-
-// Forward declarations for layout helpers used inside SettingsDlgProc
-static HWND MakeLabel(HWND p, HINSTANCE hi, const wchar_t* txt, int x, int y, int w, int h);
-static HWND MakeSliderRow(HWND p, HINSTANCE hi, const wchar_t* label,
-                           UINT editId, UINT sldId, int x, int y, int rowW,
-                           int sldMin, int sldMax, int sldInit);
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Settings window
@@ -869,7 +743,6 @@ static HWND MakeSliderRow(HWND p, HINSTANCE hi, const wchar_t* label,
 //   │                             Scroll speed             │
 //   │                             Vertical:  [20][======]  │
 //   │                             Horizontal:[20][======]  │
-//   │                             Sensitivity:[11][======] │
 //   │                                                      │
 //   │                             Natural scroll           │
 //   │                             [ ] Reverse vertical     │
@@ -895,11 +768,6 @@ static float SliderToEdge(int pos) { return pos / 100.f; }
 static int   SpeedToSlider(float v) { return std::max(1, std::min(40, (int)(v + 0.5f))); }
 static float SliderToSpeed(int pos) { return (float)pos; }
 
-// Reverse threshold: stored as fraction (0.001–0.030), displayed/slid as integer 1–30 (× 1000)
-// UI clamps to 1–30; INI accepts any positive value for power-user fine-tuning.
-static int   ThreshToSlider(float v) { return std::max(1, std::min(30, (int)(v * 1000.f + 0.5f))); }
-static float SliderToThresh(int pos) { return pos / 1000.f; }
-
 static float GetEditFloat(HWND dlg, UINT id, float fallback)
 {
     wchar_t buf[32] = {};
@@ -920,14 +788,6 @@ static void SetEditSpeed(HWND dlg, UINT id, float v)
 {
     wchar_t buf[16];
     swprintf_s(buf, L"%d", (int)(v + 0.5f));
-    SetDlgItemTextW(dlg, id, buf);
-}
-
-// Format reverse threshold as integer × 1000 (e.g. 0.011 → "11")
-static void SetEditThresh(HWND dlg, UINT id, float v)
-{
-    wchar_t buf[16];
-    swprintf_s(buf, L"%d", ThreshToSlider(v));
     SetDlgItemTextW(dlg, id, buf);
 }
 
@@ -1017,168 +877,12 @@ static LRESULT CALLBACK PreviewSubclassProc(HWND hwnd, UINT msg,
     return DefSubclassProc(hwnd, msg, wp, lp);
 }
 
-// Settings dialog procedure
-// This is a proper Windows DLGPROC. Windows handles Tab/Shift-Tab, Enter, and
-// Escape automatically via IsDialogMessage in the main message loop — no manual
-// keyboard handling needed here.
-static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+// Settings window procedure
+static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg)
     {
-    // ── Dialog initialisation: create all controls and size the window ─────────
-    case WM_INITDIALOG:
-    {
-        HINSTANCE hi = GetModuleHandleW(nullptr);
-
-        // ── Dimensions ────────────────────────────────────────────────────────
-        const int PAD    = 14;
-        const int PREVW  = 220;                    // 16:10 landscape touchpad shape
-        const int PREVH  = 138;                    // 220 * 10/16
-        const int COL1   = PAD;
-        const int COL2   = COL1 + PREVW + PAD*2;  // right column x
-        const int RCOLW  = 290;                    // right column width
-        const int CLW    = COL2 + RCOLW + PAD;    // total client width
-        const int LH     = 18;                     // section label height
-        const int RH     = 30;                     // slider row height
-
-        // Calculate total client height by simulating the layout
-        int ry = PAD;
-        ry += LH + 4;   // "Edge zones"
-        ry += RH;       // right edge row
-        ry += RH + 10;  // bottom edge row + gap
-        ry += LH + 4;   // "Scroll speed"
-        ry += RH;       // vertical row
-        ry += RH;       // horizontal row
-        ry += RH + 10;  // sensitivity row + gap
-        ry += LH + 4;   // "Natural scroll"
-        ry += LH + 6;   // checkbox V
-        ry += LH + 6;   // checkbox H
-        const int BTN_H   = 26;
-        const int BTN_GAP = 14;
-        const int CLH     = ry + BTN_GAP + BTN_H + PAD;
-
-        // Resize dialog to computed pixel dimensions
-        RECT adj = { 0, 0, CLW, CLH };
-        AdjustWindowRect(&adj, WS_CAPTION | WS_SYSMENU, FALSE);
-        SetWindowPos(hwnd, nullptr, 0, 0,
-            adj.right - adj.left, adj.bottom - adj.top,
-            SWP_NOMOVE | SWP_NOZORDER);
-
-        // ── Preview panel (left) ──────────────────────────────────────────────
-        ry = PAD;
-        HWND prev = CreateWindowW(L"STATIC", nullptr,
-            WS_CHILD | WS_VISIBLE | SS_OWNERDRAW,
-            COL1, PAD, PREVW, PREVH,
-            hwnd, reinterpret_cast<HMENU>((UINT_PTR)IDC_PREVIEW), hi, nullptr);
-        SetWindowSubclass(prev, PreviewSubclassProc, 0, 0);
-
-        // Legend below preview
-        MakeLabel(hwnd, hi,
-            L"Blue  = vertical scroll zone\nGreen = horizontal scroll zone",
-            COL1, PAD + PREVH + 6, PREVW, LH * 2 + 4);
-
-        // Autostart checkbox below legend (left column)
-        CreateWindowW(L"BUTTON", L"Start with Windows",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-            COL1, PAD + PREVH + 6 + LH * 2 + 4 + 8, PREVW, LH + 2,
-            hwnd, reinterpret_cast<HMENU>((UINT_PTR)IDC_AUTOSTART), hi, nullptr);
-        CheckDlgButton(hwnd, IDC_AUTOSTART, GetAutostart() ? BST_CHECKED : BST_UNCHECKED);
-
-        // ── Right column ──────────────────────────────────────────────────────
-
-        // Section: Edge zones
-        MakeLabel(hwnd, hi, L"Edge zones", COL2, ry, RCOLW, LH);
-        ry += LH + 4;
-
-        MakeSliderRow(hwnd, hi, L"Right edge:",
-            IDC_EDGE_RIGHT, IDC_SLD_EDGE_R, COL2, ry, RCOLW,
-            1, 30, EdgeToSlider(g_edgeRight));
-        SetEditEdge(hwnd, IDC_EDGE_RIGHT, g_edgeRight);
-        ry += RH;
-
-        MakeSliderRow(hwnd, hi, L"Bottom edge:",
-            IDC_EDGE_BOTTOM, IDC_SLD_EDGE_B, COL2, ry, RCOLW,
-            1, 30, EdgeToSlider(g_edgeBottom));
-        SetEditEdge(hwnd, IDC_EDGE_BOTTOM, g_edgeBottom);
-        ry += RH + 10;
-
-        // Section: Scroll speed
-        MakeLabel(hwnd, hi, L"Scroll speed (clicks / swipe)", COL2, ry, RCOLW, LH);
-        ry += LH + 4;
-
-        MakeSliderRow(hwnd, hi, L"Vertical:",
-            IDC_SPEED_V, IDC_SLD_SPEED_V, COL2, ry, RCOLW,
-            1, 40, SpeedToSlider(g_speedV));
-        SetEditSpeed(hwnd, IDC_SPEED_V, g_speedV);
-        ry += RH;
-
-        MakeSliderRow(hwnd, hi, L"Horizontal:",
-            IDC_SPEED_H, IDC_SLD_SPEED_H, COL2, ry, RCOLW,
-            1, 40, SpeedToSlider(g_speedH));
-        SetEditSpeed(hwnd, IDC_SPEED_H, g_speedH);
-        ry += RH;
-
-        MakeSliderRow(hwnd, hi, L"Sensitivity:",
-            IDC_REVERSE_THRESH, IDC_SLD_REVERSE_T, COL2, ry, RCOLW,
-            1, 30, ThreshToSlider(g_reverseThreshold));
-        SetEditThresh(hwnd, IDC_REVERSE_THRESH, g_reverseThreshold);
-        ry += RH + 10;
-
-        // Section: Natural scroll
-        MakeLabel(hwnd, hi, L"Natural (reversed) scroll", COL2, ry, RCOLW, LH);
-        ry += LH + 4;
-
-        CreateWindowW(L"BUTTON", L"Reverse vertical",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-            COL2, ry, RCOLW, LH + 2,
-            hwnd, reinterpret_cast<HMENU>((UINT_PTR)IDC_NATURAL_V), hi, nullptr);
-        CheckDlgButton(hwnd, IDC_NATURAL_V, g_naturalV ? BST_CHECKED : BST_UNCHECKED);
-        ry += LH + 6;
-
-        CreateWindowW(L"BUTTON", L"Reverse horizontal",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-            COL2, ry, RCOLW, LH + 2,
-            hwnd, reinterpret_cast<HMENU>((UINT_PTR)IDC_NATURAL_H), hi, nullptr);
-        CheckDlgButton(hwnd, IDC_NATURAL_H, g_naturalH ? BST_CHECKED : BST_UNCHECKED);
-
-        // ── OK / Cancel ───────────────────────────────────────────────────────
-        const int BTN_W = 82;
-        const int BTN_Y = CLH - PAD - BTN_H;
-        const int BTN_X = CLW - PAD - BTN_W * 2 - 8;
-
-        // Use standard IDOK / IDCANCEL so the dialog manager routes
-        // Enter → OK and Escape → Cancel automatically.
-        CreateWindowW(L"BUTTON", L"OK",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-            BTN_X, BTN_Y, BTN_W, BTN_H,
-            hwnd, reinterpret_cast<HMENU>((UINT_PTR)IDOK), hi, nullptr);
-        CreateWindowW(L"BUTTON", L"Cancel",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-            BTN_X + BTN_W + 8, BTN_Y, BTN_W, BTN_H,
-            hwnd, reinterpret_cast<HMENU>((UINT_PTR)IDCANCEL), hi, nullptr);
-
-        // Apply system dialog font to all children
-        HFONT font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
-        EnumChildWindows(hwnd, [](HWND child, LPARAM lp) -> BOOL {
-            SendMessageW(child, WM_SETFONT, (WPARAM)lp, TRUE);
-            return TRUE;
-        }, reinterpret_cast<LPARAM>(font));
-
-        // Centre on screen
-        RECT wr;
-        GetWindowRect(hwnd, &wr);
-        int sw = GetSystemMetrics(SM_CXSCREEN);
-        int sh = GetSystemMetrics(SM_CYSCREEN);
-        SetWindowPos(hwnd, nullptr,
-            (sw - (wr.right - wr.left)) / 2,
-            (sh - (wr.bottom - wr.top)) / 2,
-            0, 0, SWP_NOZORDER | SWP_NOSIZE);
-
-        RefreshPreview(hwnd);
-        return TRUE;  // let Windows set focus to first tabstop control
-    }
-
-    // ── Slider moved ──────────────────────────────────────────────────────────
+    // ── Slider moved ─────────────────────────────────────────────────────────
     case WM_HSCROLL:
     {
         if (g_syncLock) break;
@@ -1186,16 +890,15 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         int  pos  = (int)SendMessageW(sldr, TBM_GETPOS, 0, 0);
         int  id   = GetDlgCtrlID(sldr);
         g_syncLock = true;
-        if (id == IDC_SLD_EDGE_R)    { SetEditEdge (hwnd, IDC_EDGE_RIGHT,  SliderToEdge (pos)); RefreshPreview(hwnd); }
-        if (id == IDC_SLD_EDGE_B)    { SetEditEdge (hwnd, IDC_EDGE_BOTTOM, SliderToEdge (pos)); RefreshPreview(hwnd); }
-        if (id == IDC_SLD_SPEED_V)   { SetEditSpeed(hwnd, IDC_SPEED_V,     SliderToSpeed(pos)); }
-        if (id == IDC_SLD_SPEED_H)   { SetEditSpeed(hwnd, IDC_SPEED_H,     SliderToSpeed(pos)); }
-        if (id == IDC_SLD_REVERSE_T) { SetEditThresh(hwnd, IDC_REVERSE_THRESH, SliderToThresh(pos)); }
+        if (id == IDC_SLD_EDGE_R)  { SetEditEdge (hwnd, IDC_EDGE_RIGHT,  SliderToEdge (pos)); RefreshPreview(hwnd); }
+        if (id == IDC_SLD_EDGE_B)  { SetEditEdge (hwnd, IDC_EDGE_BOTTOM, SliderToEdge (pos)); RefreshPreview(hwnd); }
+        if (id == IDC_SLD_SPEED_V) { SetEditSpeed(hwnd, IDC_SPEED_V,     SliderToSpeed(pos)); }
+        if (id == IDC_SLD_SPEED_H) { SetEditSpeed(hwnd, IDC_SPEED_H,     SliderToSpeed(pos)); }
         g_syncLock = false;
-        return TRUE;
+        break;
     }
 
-    // ── Command (edits, buttons) ───────────────────────────────────────────────
+    // ── Edit changed ─────────────────────────────────────────────────────────
     case WM_COMMAND:
     {
         UINT id  = LOWORD(wp);
@@ -1203,54 +906,54 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
 
         if (evt == EN_CHANGE && !g_syncLock) {
             g_syncLock = true;
-            if (id == IDC_EDGE_RIGHT)     { int pct = std::max(1, std::min(30, (int)GetEditFloat(hwnd, id, g_edgeRight  * 100.f))); SetSliderPos(hwnd, IDC_SLD_EDGE_R,  pct); RefreshPreview(hwnd); }
-            if (id == IDC_EDGE_BOTTOM)    { int pct = std::max(1, std::min(30, (int)GetEditFloat(hwnd, id, g_edgeBottom * 100.f))); SetSliderPos(hwnd, IDC_SLD_EDGE_B,  pct); RefreshPreview(hwnd); }
-            if (id == IDC_SPEED_V)        { float v = GetEditFloat(hwnd, id, g_speedV);     SetSliderPos(hwnd, IDC_SLD_SPEED_V, SpeedToSlider(v)); }
-            if (id == IDC_SPEED_H)        { float v = GetEditFloat(hwnd, id, g_speedH);     SetSliderPos(hwnd, IDC_SLD_SPEED_H, SpeedToSlider(v)); }
-            if (id == IDC_REVERSE_THRESH) { int t = std::max(1, std::min(30, (int)GetEditFloat(hwnd, id, g_reverseThreshold * 1000.f))); SetSliderPos(hwnd, IDC_SLD_REVERSE_T, t); }
+            if (id == IDC_EDGE_RIGHT)  { int pct = std::max(1, std::min(30, (int)GetEditFloat(hwnd, id, g_edgeRight  * 100.f))); SetSliderPos(hwnd, IDC_SLD_EDGE_R,  pct); RefreshPreview(hwnd); }
+            if (id == IDC_EDGE_BOTTOM) { int pct = std::max(1, std::min(30, (int)GetEditFloat(hwnd, id, g_edgeBottom * 100.f))); SetSliderPos(hwnd, IDC_SLD_EDGE_B,  pct); RefreshPreview(hwnd); }
+            if (id == IDC_SPEED_V)     { float v = GetEditFloat(hwnd, id, g_speedV);     SetSliderPos(hwnd, IDC_SLD_SPEED_V, SpeedToSlider(v)); }
+            if (id == IDC_SPEED_H)     { float v = GetEditFloat(hwnd, id, g_speedH);     SetSliderPos(hwnd, IDC_SLD_SPEED_H, SpeedToSlider(v)); }
             g_syncLock = false;
         }
 
-        if (id == IDOK) {
+        if (id == IDC_OK) {
             // Edge values are entered as integers (percent), e.g. "8" = 8% = 0.08
             float r  = GetEditFloat(hwnd, IDC_EDGE_RIGHT,  g_edgeRight  * 100.f) / 100.f;
             float b  = GetEditFloat(hwnd, IDC_EDGE_BOTTOM, g_edgeBottom * 100.f) / 100.f;
             float sv = GetEditFloat(hwnd, IDC_SPEED_V,     g_speedV);
             float sh = GetEditFloat(hwnd, IDC_SPEED_H,     g_speedH);
-            float rt = GetEditFloat(hwnd, IDC_REVERSE_THRESH, g_reverseThreshold * 1000.f) / 1000.f;
-            r  = std::max(0.01f, std::min(0.30f, r));
-            b  = std::max(0.01f, std::min(0.30f, b));
+            r  = std::max(0.01f, std::min(0.30f,  r));
+            b  = std::max(0.01f, std::min(0.30f,  b));
             sv = std::max(1.f,   std::min(40.f,  sv));
             sh = std::max(1.f,   std::min(40.f,  sh));
-            // rt: only clamp to sane minimum; no upper clamp — mirrors INI read behaviour
-            rt = std::max(0.001f, rt);
-            g_edgeRight        = r;
-            g_edgeBottom       = b;
-            g_speedV           = sv;
-            g_speedH           = sh;
-            g_reverseThreshold = rt;
+            g_edgeRight  = r;
+            g_edgeBottom = b;
+            g_speedV     = sv;
+            g_speedH     = sh;
             g_naturalV   = (IsDlgButtonChecked(hwnd, IDC_NATURAL_V) == BST_CHECKED);
             g_naturalH   = (IsDlgButtonChecked(hwnd, IDC_NATURAL_H) == BST_CHECKED);
             SetAutostart(IsDlgButtonChecked(hwnd, IDC_AUTOSTART) == BST_CHECKED);
             SaveSettings();
             DestroyWindow(hwnd);
         }
-        if (id == IDCANCEL) DestroyWindow(hwnd);
-        return TRUE;
+        if (id == IDC_CANCEL) DestroyWindow(hwnd);
+        break;
     }
+
+    case WM_KEYDOWN:
+        if (wp == VK_ESCAPE) DestroyWindow(hwnd);
+        if (wp == VK_RETURN) SendMessageW(hwnd, WM_COMMAND, IDC_OK, 0);
+        break;
 
     case WM_DESTROY:
         g_settingsWnd = nullptr;
-        return TRUE;
+        break;
 
     case WM_CLOSE:
         DestroyWindow(hwnd);
-        return TRUE;
+        break;
     }
-    return FALSE;  // unhandled — do NOT call DefWindowProc in a DLGPROC
+    return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
-// ── Layout helpers ─────────────────────────────────────────────────────────────
+// ── Layout helpers ────────────────────────────────────────────────────────────
 
 static HWND MakeLabel(HWND p, HINSTANCE hi, const wchar_t* txt, int x, int y, int w, int h)
 {
@@ -1278,14 +981,14 @@ static HWND MakeSliderRow(HWND p, HINSTANCE hi,
 
     // Edit
     HWND edit = CreateWindowW(L"EDIT", nullptr,
-        WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL,
+        WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
         x + LBL_W + GAP, y, EDT_W, ROW_H,
         p, reinterpret_cast<HMENU>((UINT_PTR)editId), hi, nullptr);
     (void)edit;
 
     // Trackbar
     HWND sld = CreateWindowW(TRACKBAR_CLASSW, nullptr,
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_NOTICKS,
+        WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
         x + LBL_W + GAP + EDT_W + GAP, y - 2, SLD_W, ROW_H + 4,
         p, reinterpret_cast<HMENU>((UINT_PTR)sldId), hi, nullptr);
     SendMessageW(sld, TBM_SETRANGE, TRUE, MAKELPARAM(sldMin, sldMax));
@@ -1298,20 +1001,172 @@ static void ShowSettingsWindow(HWND parent)
 {
     if (g_settingsWnd) { SetForegroundWindow(g_settingsWnd); return; }
 
-    // Create as a proper modeless dialog from the resource template.
-    // Windows then handles Tab/Shift-Tab, Enter (OK), and Escape (Cancel)
-    // automatically via IsDialogMessage in the main message loop.
-    g_settingsWnd = CreateDialogW(
-        GetModuleHandleW(nullptr),
-        MAKEINTRESOURCEW(IDD_SETTINGS),
-        parent,
-        SettingsDlgProc);
+    HINSTANCE hi = GetModuleHandleW(nullptr);
+
+    // Init common controls (needed for TrackBar / Slider)
+    INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_BAR_CLASSES };
+    InitCommonControlsEx(&icc);
+
+    // Register settings window class (once)
+    static bool classReg = false;
+    if (!classReg) {
+        WNDCLASSW wc     = {};
+        wc.lpfnWndProc   = SettingsWndProc;
+        wc.hInstance     = hi;
+        wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+        wc.lpszClassName = L"GyroScrollSettings_v1";
+        wc.hCursor       = LoadCursorW(nullptr, reinterpret_cast<LPCWSTR>(IDC_ARROW));
+        RegisterClassW(&wc);
+        classReg = true;
+    }
+
+    // ── Dimensions ────────────────────────────────────────────────────────────
+    // All measurements are in CLIENT area pixels.
+    // We use AdjustWindowRect to derive the correct outer window size.
+    const int PAD    = 14;
+    const int PREVW  = 220;                    // 16:10 landscape touchpad shape
+    const int PREVH  = 138;                    // 220 * 10/16
+    const int COL1   = PAD;
+    const int COL2   = COL1 + PREVW + PAD*2;  // right column x
+    const int RCOLW  = 290;                    // right column width
+    const int CLW    = COL2 + RCOLW + PAD;    // total client width
+    const int LH     = 18;                     // section label height
+    const int RH     = 30;                     // slider row height
+
+    // Calculate total client height by simulating the layout
+    int ry = PAD;
+    ry += LH + 4;   // "Edge zones"
+    ry += RH;       // right edge row
+    ry += RH + 10;  // bottom edge row + gap
+    ry += LH + 4;   // "Scroll speed"
+    ry += RH;       // vertical row
+    ry += RH + 10;  // horizontal row + gap
+    ry += LH + 4;   // "Natural scroll"
+    ry += LH + 6;   // checkbox V
+    ry += LH + 6;   // checkbox H
+    const int BTN_H  = 26;
+    const int BTN_GAP = 14;
+    const int CLH    = ry + BTN_GAP + BTN_H + PAD;  // total client height
+
+    // Outer window size = client size + frame chrome
+    RECT adj = { 0, 0, CLW, CLH };
+    AdjustWindowRect(&adj, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE);
+    const int WW = adj.right  - adj.left;
+    const int WH = adj.bottom - adj.top;
+
+    g_settingsWnd = CreateWindowW(
+        L"GyroScrollSettings_v1", L"GyroScroll Settings (GyroScroll.ini)",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+        CW_USEDEFAULT, CW_USEDEFAULT, WW, WH,
+        parent, nullptr, hi, nullptr);
     if (!g_settingsWnd) return;
+
+    // ── Preview panel (left) ──────────────────────────────────────────────────
+    ry = PAD;  // reset after height calculation above
+    HWND prev = CreateWindowW(L"STATIC", nullptr,
+        WS_CHILD | WS_VISIBLE | SS_OWNERDRAW,
+        COL1, PAD, PREVW, PREVH,
+        g_settingsWnd, reinterpret_cast<HMENU>((UINT_PTR)IDC_PREVIEW), hi, nullptr);
+    SetWindowSubclass(prev, PreviewSubclassProc, 0, 0);
+
+    // Legend below preview
+    MakeLabel(g_settingsWnd, hi,
+        L"Blue  = vertical scroll zone\nGreen = horizontal scroll zone",
+        COL1, PAD + PREVH + 6, PREVW, LH * 2 + 4);
+
+    // Autostart checkbox below legend (left column)
+    CreateWindowW(L"BUTTON", L"Start with Windows",
+        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        COL1, PAD + PREVH + 6 + LH * 2 + 4 + 8, PREVW, LH + 2,
+        g_settingsWnd, reinterpret_cast<HMENU>((UINT_PTR)IDC_AUTOSTART), hi, nullptr);
+    CheckDlgButton(g_settingsWnd, IDC_AUTOSTART, GetAutostart() ? BST_CHECKED : BST_UNCHECKED);
+
+    // ── Right column ──────────────────────────────────────────────────────────
+
+    // Section: Edge zones
+    MakeLabel(g_settingsWnd, hi, L"Edge zones", COL2, ry, RCOLW, LH);
+    ry += LH + 4;
+
+    MakeSliderRow(g_settingsWnd, hi, L"Right edge:",
+        IDC_EDGE_RIGHT, IDC_SLD_EDGE_R, COL2, ry, RCOLW,
+        1, 30, EdgeToSlider(g_edgeRight));
+    SetEditEdge(g_settingsWnd, IDC_EDGE_RIGHT, g_edgeRight);
+    ry += RH;
+
+    MakeSliderRow(g_settingsWnd, hi, L"Bottom edge:",
+        IDC_EDGE_BOTTOM, IDC_SLD_EDGE_B, COL2, ry, RCOLW,
+        1, 30, EdgeToSlider(g_edgeBottom));
+    SetEditEdge(g_settingsWnd, IDC_EDGE_BOTTOM, g_edgeBottom);
+    ry += RH + 10;
+
+    // Section: Scroll speed
+    MakeLabel(g_settingsWnd, hi, L"Scroll speed (clicks / swipe)", COL2, ry, RCOLW, LH);
+    ry += LH + 4;
+
+    MakeSliderRow(g_settingsWnd, hi, L"Vertical:",
+        IDC_SPEED_V, IDC_SLD_SPEED_V, COL2, ry, RCOLW,
+        1, 40, SpeedToSlider(g_speedV));
+    SetEditSpeed(g_settingsWnd, IDC_SPEED_V, g_speedV);
+    ry += RH;
+
+    MakeSliderRow(g_settingsWnd, hi, L"Horizontal:",
+        IDC_SPEED_H, IDC_SLD_SPEED_H, COL2, ry, RCOLW,
+        1, 40, SpeedToSlider(g_speedH));
+    SetEditSpeed(g_settingsWnd, IDC_SPEED_H, g_speedH);
+    ry += RH + 10;
+
+    // Section: Natural scroll
+    MakeLabel(g_settingsWnd, hi, L"Natural (reversed) scroll", COL2, ry, RCOLW, LH);
+    ry += LH + 4;
+
+    CreateWindowW(L"BUTTON", L"Reverse vertical",
+        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        COL2, ry, RCOLW, LH + 2,
+        g_settingsWnd, reinterpret_cast<HMENU>((UINT_PTR)IDC_NATURAL_V), hi, nullptr);
+    CheckDlgButton(g_settingsWnd, IDC_NATURAL_V, g_naturalV ? BST_CHECKED : BST_UNCHECKED);
+    ry += LH + 6;
+
+    CreateWindowW(L"BUTTON", L"Reverse horizontal",
+        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        COL2, ry, RCOLW, LH + 2,
+        g_settingsWnd, reinterpret_cast<HMENU>((UINT_PTR)IDC_NATURAL_H), hi, nullptr);
+    CheckDlgButton(g_settingsWnd, IDC_NATURAL_H, g_naturalH ? BST_CHECKED : BST_UNCHECKED);
+
+    // ── OK / Cancel ───────────────────────────────────────────────────────────
+    const int BTN_W = 82;
+    const int BTN_Y = CLH - PAD - BTN_H;
+    const int BTN_X = CLW - PAD - BTN_W * 2 - 8;
+
+    CreateWindowW(L"BUTTON", L"OK",
+        WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+        BTN_X, BTN_Y, BTN_W, BTN_H,
+        g_settingsWnd, reinterpret_cast<HMENU>((UINT_PTR)IDC_OK), hi, nullptr);
+    CreateWindowW(L"BUTTON", L"Cancel",
+        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        BTN_X + BTN_W + 8, BTN_Y, BTN_W, BTN_H,
+        g_settingsWnd, reinterpret_cast<HMENU>((UINT_PTR)IDC_CANCEL), hi, nullptr);
+
+    // Apply system dialog font to all children
+    HFONT font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+    EnumChildWindows(g_settingsWnd, [](HWND child, LPARAM lp) -> BOOL {
+        SendMessageW(child, WM_SETFONT, (WPARAM)lp, TRUE);
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(font));
+
+    // Centre on screen
+    RECT wr;
+    GetWindowRect(g_settingsWnd, &wr);
+    int sw = GetSystemMetrics(SM_CXSCREEN);
+    int sh = GetSystemMetrics(SM_CYSCREEN);
+    SetWindowPos(g_settingsWnd, nullptr,
+        (sw - (wr.right - wr.left)) / 2,
+        (sh - (wr.bottom - wr.top)) / 2,
+        0, 0, SWP_NOZORDER | SWP_NOSIZE);
 
     ShowWindow(g_settingsWnd, SW_SHOW);
     UpdateWindow(g_settingsWnd);
+    RefreshPreview(g_settingsWnd);
 }
-
 
 static void AddTrayIcon(HWND hwnd)
 {
@@ -1428,11 +1283,6 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
                  + L"GyroScroll.ini";
     LoadSettings();
 
-    // Init common controls once at startup — needed for sliders (ICC_BAR_CLASSES)
-    // and the SysLink control in the About dialog (ICC_LINK_CLASS).
-    INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_BAR_CLASSES | ICC_LINK_CLASS };
-    InitCommonControlsEx(&icc);
-
     WNDCLASSW wc     = {};
     wc.lpfnWndProc   = WndProc;
     wc.hInstance     = hInst;
@@ -1454,12 +1304,6 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-        // IsDialogMessage handles Tab/Shift-Tab, Enter, and Escape for the
-        // settings dialog automatically — because it is a real dialog window.
-        if (g_settingsWnd && IsDialogMessageW(g_settingsWnd, &msg))
-            continue;
-        if (g_aboutWnd && IsDialogMessageW(g_aboutWnd, &msg))
-            continue;
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }

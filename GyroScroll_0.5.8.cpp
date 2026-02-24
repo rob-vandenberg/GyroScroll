@@ -46,7 +46,7 @@
  *   SpeedH=20           ; horizontal scroll clicks per full pad traversal
  *   NaturalV=0          ; 1 = natural (reverse) vertical scrolling
  *   NaturalH=0          ; 1 = natural (reverse) horizontal scrolling
- *   Sensitivity=11      ; direction flip sensitivity (× 1000 internally, e.g. 11 = 0.011)
+ *   ReverseThreshold=11 ; direction flip sensitivity (× 1000 internally, e.g. 11 = 0.011)
  *                       ; UI range is 1–30; values beyond 30 are accepted for fine-tuning
  *
  * ─── AUTOSTART ───────────────────────────────────────────────────────────────
@@ -94,8 +94,8 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
 #define VERSION_MAJOR  0
 #define VERSION_MINOR  5
-#define VERSION_PATCH  46
-#define VERSION_STRING "0.5.46"
+#define VERSION_PATCH  8
+#define VERSION_STRING "0.5.8"
 #ifdef _WIN64
     #define BITNESS_STRING "64-bit"
 #else
@@ -103,11 +103,9 @@
 #endif
 
 
-#define IDI_APPICON   1
-#define IDD_SETTINGS  101
-#define IDD_ABOUT     102
-#define IDC_VERSION   200
-#define IDC_LINK_URL  201
+#define IDI_APPICON  1
+#define IDD_SETTINGS 101
+#define IDD_ABOUT    102
 
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -163,22 +161,20 @@ static void LoadSettings()
 static void SaveSettings()
 {
     const wchar_t* S = L"GyroScroll";
-    auto wi = [&](const wchar_t* k, int v) {
-        wchar_t buf[16];
-        swprintf_s(buf, L"%d", v);
-        WritePrivateProfileStringW(S, k, buf, g_iniPath.c_str());
+    auto wf = [&](const wchar_t* k, float v) {
+        WritePrivateProfileStringW(S, k, std::to_wstring(v).c_str(), g_iniPath.c_str());
     };
     auto wb = [&](const wchar_t* k, bool v) {
         WritePrivateProfileStringW(S, k, v ? L"1" : L"0", g_iniPath.c_str());
     };
-    // All values stored as plain integers (e.g. 0.08 → 8, 0.011 → 11)
-    wi(L"EdgeRight",   (int)(g_edgeRight        * 100.f  + 0.5f));
-    wi(L"EdgeBottom",  (int)(g_edgeBottom        * 100.f  + 0.5f));
-    wi(L"SpeedV",      (int)(g_speedV                     + 0.5f));
-    wi(L"SpeedH",      (int)(g_speedH                     + 0.5f));
-    wb(L"NaturalV",    g_naturalV);
-    wb(L"NaturalH",    g_naturalH);
-    wi(L"Sensitivity", (int)(g_reverseThreshold  * 1000.f + 0.5f));
+    // Edge zones stored as integers in INI (e.g. 0.08 → 8)
+    wf(L"EdgeRight",  (float)(int)(g_edgeRight  * 100.f + 0.5f));
+    wf(L"EdgeBottom", (float)(int)(g_edgeBottom * 100.f + 0.5f));
+    wf(L"SpeedV",     g_speedV);
+    wf(L"SpeedH",     g_speedH);
+    wb(L"NaturalV",   g_naturalV);
+    wb(L"NaturalH",   g_naturalH);
+    wf(L"Sensitivity", (float)(int)(g_reverseThreshold * 1000.f + 0.5f));
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -663,26 +659,14 @@ static void ProcessRawInput(HRAWINPUT hRaw)
 // System tray
 // ═════════════════════════════════════════════════════════════════════════════
 
+static HWND g_settingsWnd = nullptr;
+static HWND g_aboutWnd    = nullptr;
+
 static NOTIFYICONDATAW g_nid    = {};
 static constexpr UINT  WM_TRAY      = WM_USER + 1;
 static constexpr UINT  IDM_QUIT     = 1001;
 static constexpr UINT  IDM_SETTINGS = 1002;
 static constexpr UINT  IDM_ABOUT    = 1003;
-
-static HWND g_aboutWnd = nullptr;
-
-// ─── About dialog ──────────────────────────────────────────────────────────────
-// The GitHub link is a STATIC with SS_NOTIFY (proven reliable).
-// Its underline font is stored in the control's own GWLP_USERDATA — no global.
-// The hand cursor requires subclassing: STATIC handles WM_SETCURSOR itself and
-// sets the arrow cursor before the message ever reaches the dialog proc.
-
-static LRESULT CALLBACK LinkCursorProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
-    UINT_PTR, DWORD_PTR)
-{
-    if (msg == WM_SETCURSOR) { SetCursor(LoadCursorW(nullptr, (LPCWSTR)IDC_HAND)); return TRUE; }
-    return DefSubclassProc(hwnd, msg, wp, lp);
-}
 
 static INT_PTR CALLBACK AboutDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -690,101 +674,127 @@ static INT_PTR CALLBACK AboutDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     {
     case WM_INITDIALOG:
     {
-        HINSTANCE hi  = GetModuleHandleW(nullptr);
-        HFONT font    = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-        const int PAD = 14, ICON_W = 32, W = 400, LH = 16;
-        const int TX  = PAD + ICON_W + PAD;   // text column x
-        const int TW  = W - TX - PAD;         // text column width
+        HINSTANCE hi = GetModuleHandleW(nullptr);
+
+        // ── Dimensions ────────────────────────────────────────────────────────
+        const int PAD   = 14;
+        const int W     = 400;
+        const int LH    = 18;
+        const int LINKH = 20;
+        const int BTN_W = 82;
+        const int BTN_H = 26;
+        const int ICON_W = 32;
+        const int ICON_H = 32;
+        const int TEXT_X = PAD + ICON_W + PAD;
+        const int TEXT_W = W - TEXT_X - PAD;
+
         int y = PAD;
 
-        // Information icon — placed manually, so no MessageBox ding
-        HWND hIco = CreateWindowW(L"STATIC", nullptr,
+        // Information icon (top-left)
+        HWND hIcon = CreateWindowW(L"STATIC", nullptr,
             WS_CHILD | WS_VISIBLE | SS_ICON,
-            PAD, PAD, ICON_W, ICON_W, hwnd, nullptr, hi, nullptr);
-        SendMessageW(hIco, STM_SETICON,
-            (WPARAM)LoadIconW(nullptr, (LPCWSTR)IDI_INFORMATION), 0);
+            PAD, PAD, ICON_W, ICON_H,
+            hwnd, nullptr, hi, nullptr);
+        SendMessageW(hIcon, STM_SETICON,
+            (WPARAM)LoadIconW(nullptr, IDI_INFORMATION), 0);
 
-        // Helper: create a plain text STATIC, apply font, advance y
-        auto addLine = [&](const wchar_t* txt, int h) {
-            HWND hw = CreateWindowW(L"STATIC", txt,
-                WS_CHILD | WS_VISIBLE | SS_LEFT,
-                TX, y, TW, h, hwnd, nullptr, hi, nullptr);
-            SendMessageW(hw, WM_SETFONT, (WPARAM)font, TRUE);
-            y += h + 6;
-        };
+        // Version header
+        wchar_t header[64];
+        swprintf(header, 64, L"GyroScroll %hs (%hs)", VERSION_STRING, BITNESS_STRING);
+        CreateWindowW(L"STATIC", header,
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            TEXT_X, y, TEXT_W, LH,
+            hwnd, nullptr, hi, nullptr);
+        y += LH + 8;
 
-        wchar_t hdr[64];
-        swprintf_s(hdr, L"GyroScroll %hs (%hs)", VERSION_STRING, BITNESS_STRING);
-        addLine(hdr, LH);
-        addLine(L"Circular scrolling for Precision Touchpads in Windows 10/11", LH);
-        addLine(L"Move your finger along the right or bottom edge of your touchpad "
-                L"and make a circular motion for continuous scrolling, without lifting.",
-                LH * 2 + 4);
-        addLine(L"Copyright \u00A9 2025 Rob Vandenberg", LH);
+        // Description
+        CreateWindowW(L"STATIC",
+            L"Circular scrolling for Precision Touchpads in Windows 10/11",
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            TEXT_X, y, TEXT_W, LH,
+            hwnd, nullptr, hi, nullptr);
+        y += LH + 8;
 
-        // Clickable link — STATIC with SS_NOTIFY.
-        // Underline font is stored in GWLP_USERDATA on the control; freed in WM_DESTROY.
-        LOGFONTW lf = {};
-        GetObjectW(font, sizeof(lf), &lf);
-        lf.lfUnderline = TRUE;
-        HFONT linkFont = CreateFontIndirectW(&lf);
+        // Long description (wraps)
+        CreateWindowW(L"STATIC",
+            L"Move your finger along the right or bottom edge of your touchpad "
+            L"and make a circular motion for continuous scrolling, without lifting.",
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            TEXT_X, y, TEXT_W, LH * 3,
+            hwnd, nullptr, hi, nullptr);
+        y += LH * 3 + 8;
 
-        HWND hLink = CreateWindowW(L"STATIC",
-            L"https://github.com/rob-vandenberg/gyroscroll",
-            WS_CHILD | WS_VISIBLE | SS_NOTIFY | SS_LEFT,
-            TX, y, TW, LH + 4, hwnd,
-            reinterpret_cast<HMENU>((UINT_PTR)IDC_LINK_URL), hi, nullptr);
-        SendMessageW(hLink, WM_SETFONT, (WPARAM)linkFont, TRUE);
-        SetWindowLongPtrW(hLink, GWLP_USERDATA, (LONG_PTR)linkFont);
-        SetWindowSubclass(hLink, LinkCursorProc, 0, 0);
-        y += LH + 4 + PAD;
+        // Copyright
+        CreateWindowW(L"STATIC",
+            L"Copyright \u00A9 2025 Rob Vandenberg",
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            TEXT_X, y, TEXT_W, LH,
+            hwnd, nullptr, hi, nullptr);
+        y += LH + 8;
 
-        const int BTN_W = 80, BTN_H = 24;
-        HWND hOk = CreateWindowW(L"BUTTON", L"OK",
+        // Clickable GitHub link using SysLink control
+        CreateWindowW(WC_LINK,
+            L"<a href=\"https://github.com/rob-vandenberg/gyroscroll\">"
+            L"https://github.com/rob-vandenberg/gyroscroll</a>",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+            TEXT_X, y, TEXT_W, LINKH,
+            hwnd, nullptr, hi, nullptr);
+        y += LINKH + PAD;
+
+        // OK button — centred across full width
+        CreateWindowW(L"BUTTON", L"OK",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
             (W - BTN_W) / 2, y, BTN_W, BTN_H,
             hwnd, reinterpret_cast<HMENU>((UINT_PTR)IDOK), hi, nullptr);
-        SendMessageW(hOk, WM_SETFONT, (WPARAM)font, TRUE);
         y += BTN_H + PAD;
 
+        // Resize dialog to fit content
         RECT adj = { 0, 0, W, y };
         AdjustWindowRect(&adj, WS_CAPTION | WS_SYSMENU, FALSE);
-        int ww = adj.right - adj.left, wh = adj.bottom - adj.top;
+        SetWindowPos(hwnd, nullptr, 0, 0,
+            adj.right - adj.left, adj.bottom - adj.top,
+            SWP_NOMOVE | SWP_NOZORDER);
+
+        // Centre on screen
+        RECT wr;
+        GetWindowRect(hwnd, &wr);
         SetWindowPos(hwnd, nullptr,
-            (GetSystemMetrics(SM_CXSCREEN) - ww) / 2,
-            (GetSystemMetrics(SM_CYSCREEN) - wh) / 2,
-            ww, wh, SWP_NOZORDER);
+            (GetSystemMetrics(SM_CXSCREEN) - (wr.right - wr.left)) / 2,
+            (GetSystemMetrics(SM_CYSCREEN) - (wr.bottom - wr.top)) / 2,
+            0, 0, SWP_NOZORDER | SWP_NOSIZE);
+
+        // Apply system dialog font to all children
+        HFONT font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+        EnumChildWindows(hwnd, [](HWND child, LPARAM lp) -> BOOL {
+            SendMessageW(child, WM_SETFONT, (WPARAM)lp, TRUE);
+            return TRUE;
+        }, reinterpret_cast<LPARAM>(font));
+
         return TRUE;
     }
-    case WM_CTLCOLORSTATIC:
-        // Colour the link blue; leave all other statics at default
-        if (GetDlgCtrlID((HWND)lp) == IDC_LINK_URL) {
-            SetTextColor((HDC)wp, RGB(0, 102, 204));
-            SetBkMode((HDC)wp, TRANSPARENT);
-            return (INT_PTR)GetStockObject(NULL_BRUSH);
+
+    // Handle SysLink click — open URL in default browser
+    case WM_NOTIFY:
+    {
+        NMHDR* hdr = reinterpret_cast<NMHDR*>(lp);
+        if (hdr->code == NM_CLICK || hdr->code == NM_RETURN) {
+            NMLINK* link = reinterpret_cast<NMLINK*>(lp);
+            ShellExecuteW(hwnd, L"open", link->item.szUrl, nullptr, nullptr, SW_SHOWNORMAL);
         }
-        return FALSE;
+        return TRUE;
+    }
+
     case WM_COMMAND:
         if (LOWORD(wp) == IDOK) DestroyWindow(hwnd);
-        if (LOWORD(wp) == IDC_LINK_URL && HIWORD(wp) == STN_CLICKED)
-            ShellExecuteW(hwnd, L"open",
-                L"https://github.com/rob-vandenberg/gyroscroll",
-                nullptr, nullptr, SW_SHOWNORMAL);
         return TRUE;
+
     case WM_CLOSE:
         DestroyWindow(hwnd);
         return TRUE;
+
     case WM_DESTROY:
-    {
-        // Retrieve and free the underline font stored on the link control
-        HWND hLink = GetDlgItem(hwnd, IDC_LINK_URL);
-        if (hLink) {
-            HFONT lf = (HFONT)GetWindowLongPtrW(hLink, GWLP_USERDATA);
-            if (lf) DeleteObject(lf);
-        }
         g_aboutWnd = nullptr;
         return TRUE;
-    }
     }
     return FALSE;
 }
@@ -792,8 +802,15 @@ static INT_PTR CALLBACK AboutDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 static void ShowAboutBox(HWND hwnd)
 {
     if (g_aboutWnd) { SetForegroundWindow(g_aboutWnd); return; }
-    g_aboutWnd = CreateDialogW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_ABOUT), hwnd, AboutDlgProc);
-    if (g_aboutWnd) { ShowWindow(g_aboutWnd, SW_SHOW); UpdateWindow(g_aboutWnd); }
+
+    // Use a proper modeless dialog so there is no system ding sound,
+    // and so the GitHub link can be made clickable via SysLink.
+    g_aboutWnd = CreateDialogW(
+        GetModuleHandleW(nullptr),
+        MAKEINTRESOURCEW(IDD_ABOUT),
+        hwnd,
+        AboutDlgProc);
+    if (g_aboutWnd) ShowWindow(g_aboutWnd, SW_SHOW);
 }
 
 // Settings dialog control IDs
@@ -811,8 +828,6 @@ static constexpr UINT IDC_SLD_SPEED_H     = 2013;  // slider for horizontal spee
 static constexpr UINT IDC_AUTOSTART       = 2014;  // checkbox
 static constexpr UINT IDC_REVERSE_THRESH  = 2015;  // edit  — flip sensitivity
 static constexpr UINT IDC_SLD_REVERSE_T   = 2016;  // slider — flip sensitivity
-
-static HWND g_settingsWnd = nullptr;
 
 // Prevent re-entrant edit↔slider sync
 static bool g_syncLock = false;

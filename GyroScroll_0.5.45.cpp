@@ -94,8 +94,8 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
 #define VERSION_MAJOR  0
 #define VERSION_MINOR  5
-#define VERSION_PATCH  46
-#define VERSION_STRING "0.5.46"
+#define VERSION_PATCH  45
+#define VERSION_STRING "0.5.45"
 #ifdef _WIN64
     #define BITNESS_STRING "64-bit"
 #else
@@ -674,15 +674,7 @@ static HWND g_aboutWnd = nullptr;
 // ─── About dialog ──────────────────────────────────────────────────────────────
 // The GitHub link is a STATIC with SS_NOTIFY (proven reliable).
 // Its underline font is stored in the control's own GWLP_USERDATA — no global.
-// The hand cursor requires subclassing: STATIC handles WM_SETCURSOR itself and
-// sets the arrow cursor before the message ever reaches the dialog proc.
-
-static LRESULT CALLBACK LinkCursorProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
-    UINT_PTR, DWORD_PTR)
-{
-    if (msg == WM_SETCURSOR) { SetCursor(LoadCursorW(nullptr, (LPCWSTR)IDC_HAND)); return TRUE; }
-    return DefSubclassProc(hwnd, msg, wp, lp);
-}
+// The hand cursor is handled in WM_SETCURSOR in this proc — no subclass needed.
 
 static INT_PTR CALLBACK AboutDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -736,7 +728,6 @@ static INT_PTR CALLBACK AboutDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             reinterpret_cast<HMENU>((UINT_PTR)IDC_LINK_URL), hi, nullptr);
         SendMessageW(hLink, WM_SETFONT, (WPARAM)linkFont, TRUE);
         SetWindowLongPtrW(hLink, GWLP_USERDATA, (LONG_PTR)linkFont);
-        SetWindowSubclass(hLink, LinkCursorProc, 0, 0);
         y += LH + 4 + PAD;
 
         const int BTN_W = 80, BTN_H = 24;
@@ -764,6 +755,13 @@ static INT_PTR CALLBACK AboutDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return (INT_PTR)GetStockObject(NULL_BRUSH);
         }
         return FALSE;
+    case WM_SETCURSOR:
+        // Show hand cursor whenever the mouse is over the link control
+        if ((HWND)wp == GetDlgItem(hwnd, IDC_LINK_URL)) {
+            SetCursor(LoadCursorW(nullptr, (LPCWSTR)IDC_HAND));
+            return TRUE;
+        }
+        break;
     case WM_COMMAND:
         if (LOWORD(wp) == IDOK) DestroyWindow(hwnd);
         if (LOWORD(wp) == IDC_LINK_URL && HIWORD(wp) == STN_CLICKED)

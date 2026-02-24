@@ -94,8 +94,8 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
 #define VERSION_MAJOR  0
 #define VERSION_MINOR  5
-#define VERSION_PATCH  46
-#define VERSION_STRING "0.5.46"
+#define VERSION_PATCH  44
+#define VERSION_STRING "0.5.44"
 #ifdef _WIN64
     #define BITNESS_STRING "64-bit"
 #else
@@ -171,7 +171,7 @@ static void SaveSettings()
     auto wb = [&](const wchar_t* k, bool v) {
         WritePrivateProfileStringW(S, k, v ? L"1" : L"0", g_iniPath.c_str());
     };
-    // All values stored as plain integers (e.g. 0.08 → 8, 0.011 → 11)
+    // Edge zones stored as integers (e.g. 0.08 → 8); speed and sensitivity likewise.
     wi(L"EdgeRight",   (int)(g_edgeRight        * 100.f  + 0.5f));
     wi(L"EdgeBottom",  (int)(g_edgeBottom        * 100.f  + 0.5f));
     wi(L"SpeedV",      (int)(g_speedV                     + 0.5f));
@@ -672,17 +672,8 @@ static constexpr UINT  IDM_ABOUT    = 1003;
 static HWND g_aboutWnd = nullptr;
 
 // ─── About dialog ──────────────────────────────────────────────────────────────
-// The GitHub link is a STATIC with SS_NOTIFY (proven reliable).
-// Its underline font is stored in the control's own GWLP_USERDATA — no global.
-// The hand cursor requires subclassing: STATIC handles WM_SETCURSOR itself and
-// sets the arrow cursor before the message ever reaches the dialog proc.
-
-static LRESULT CALLBACK LinkCursorProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
-    UINT_PTR, DWORD_PTR)
-{
-    if (msg == WM_SETCURSOR) { SetCursor(LoadCursorW(nullptr, (LPCWSTR)IDC_HAND)); return TRUE; }
-    return DefSubclassProc(hwnd, msg, wp, lp);
-}
+// SysLink (WC_LINK) handles blue colour, hand cursor, and click natively.
+// No sound: the information icon is placed manually — no MessageBox involved.
 
 static INT_PTR CALLBACK AboutDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -690,22 +681,22 @@ static INT_PTR CALLBACK AboutDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     {
     case WM_INITDIALOG:
     {
-        HINSTANCE hi  = GetModuleHandleW(nullptr);
-        HFONT font    = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+        HINSTANCE hi = GetModuleHandleW(nullptr);
+        HFONT font   = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
         const int PAD = 14, ICON_W = 32, W = 400, LH = 16;
         const int TX  = PAD + ICON_W + PAD;   // text column x
         const int TW  = W - TX - PAD;         // text column width
         int y = PAD;
 
-        // Information icon — placed manually, so no MessageBox ding
+        // Information icon — no MessageBox, no ding
         HWND hIco = CreateWindowW(L"STATIC", nullptr,
             WS_CHILD | WS_VISIBLE | SS_ICON,
             PAD, PAD, ICON_W, ICON_W, hwnd, nullptr, hi, nullptr);
         SendMessageW(hIco, STM_SETICON,
             (WPARAM)LoadIconW(nullptr, (LPCWSTR)IDI_INFORMATION), 0);
 
-        // Helper: create a plain text STATIC, apply font, advance y
-        auto addLine = [&](const wchar_t* txt, int h) {
+        // Helper: create a left-aligned STATIC, set font, advance y
+        auto addStatic = [&](const wchar_t* txt, int h) {
             HWND hw = CreateWindowW(L"STATIC", txt,
                 WS_CHILD | WS_VISIBLE | SS_LEFT,
                 TX, y, TW, h, hwnd, nullptr, hi, nullptr);
@@ -715,28 +706,21 @@ static INT_PTR CALLBACK AboutDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         wchar_t hdr[64];
         swprintf_s(hdr, L"GyroScroll %hs (%hs)", VERSION_STRING, BITNESS_STRING);
-        addLine(hdr, LH);
-        addLine(L"Circular scrolling for Precision Touchpads in Windows 10/11", LH);
-        addLine(L"Move your finger along the right or bottom edge of your touchpad "
-                L"and make a circular motion for continuous scrolling, without lifting.",
-                LH * 2 + 4);
-        addLine(L"Copyright \u00A9 2025 Rob Vandenberg", LH);
+        addStatic(hdr, LH);
+        addStatic(L"Circular scrolling for Precision Touchpads in Windows 10/11", LH);
+        addStatic(L"Move your finger along the right or bottom edge of your touchpad "
+                  L"and make a circular motion for continuous scrolling, without lifting.",
+                  LH * 2 + 4);
+        addStatic(L"Copyright \u00A9 2025 Rob Vandenberg", LH);
 
-        // Clickable link — STATIC with SS_NOTIFY.
-        // Underline font is stored in GWLP_USERDATA on the control; freed in WM_DESTROY.
-        LOGFONTW lf = {};
-        GetObjectW(font, sizeof(lf), &lf);
-        lf.lfUnderline = TRUE;
-        HFONT linkFont = CreateFontIndirectW(&lf);
-
-        HWND hLink = CreateWindowW(L"STATIC",
-            L"https://github.com/rob-vandenberg/gyroscroll",
-            WS_CHILD | WS_VISIBLE | SS_NOTIFY | SS_LEFT,
+        // SysLink: blue colour, hand cursor, and NM_CLICK — all built-in
+        HWND hLink = CreateWindowW(L"SysLink",
+            L"<a href=\"https://github.com/rob-vandenberg/gyroscroll\">"
+            L"https://github.com/rob-vandenberg/gyroscroll</a>",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
             TX, y, TW, LH + 4, hwnd,
             reinterpret_cast<HMENU>((UINT_PTR)IDC_LINK_URL), hi, nullptr);
-        SendMessageW(hLink, WM_SETFONT, (WPARAM)linkFont, TRUE);
-        SetWindowLongPtrW(hLink, GWLP_USERDATA, (LONG_PTR)linkFont);
-        SetWindowSubclass(hLink, LinkCursorProc, 0, 0);
+        SendMessageW(hLink, WM_SETFONT, (WPARAM)font, TRUE);
         y += LH + 4 + PAD;
 
         const int BTN_W = 80, BTN_H = 24;
@@ -756,35 +740,24 @@ static INT_PTR CALLBACK AboutDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             ww, wh, SWP_NOZORDER);
         return TRUE;
     }
-    case WM_CTLCOLORSTATIC:
-        // Colour the link blue; leave all other statics at default
-        if (GetDlgCtrlID((HWND)lp) == IDC_LINK_URL) {
-            SetTextColor((HDC)wp, RGB(0, 102, 204));
-            SetBkMode((HDC)wp, TRANSPARENT);
-            return (INT_PTR)GetStockObject(NULL_BRUSH);
-        }
-        return FALSE;
-    case WM_COMMAND:
-        if (LOWORD(wp) == IDOK) DestroyWindow(hwnd);
-        if (LOWORD(wp) == IDC_LINK_URL && HIWORD(wp) == STN_CLICKED)
+    case WM_NOTIFY:
+    {
+        NMHDR* hdr = reinterpret_cast<NMHDR*>(lp);
+        if (hdr->code == NM_CLICK && hdr->idFrom == IDC_LINK_URL)
             ShellExecuteW(hwnd, L"open",
                 L"https://github.com/rob-vandenberg/gyroscroll",
                 nullptr, nullptr, SW_SHOWNORMAL);
+        return TRUE;
+    }
+    case WM_COMMAND:
+        if (LOWORD(wp) == IDOK) DestroyWindow(hwnd);
         return TRUE;
     case WM_CLOSE:
         DestroyWindow(hwnd);
         return TRUE;
     case WM_DESTROY:
-    {
-        // Retrieve and free the underline font stored on the link control
-        HWND hLink = GetDlgItem(hwnd, IDC_LINK_URL);
-        if (hLink) {
-            HFONT lf = (HFONT)GetWindowLongPtrW(hLink, GWLP_USERDATA);
-            if (lf) DeleteObject(lf);
-        }
         g_aboutWnd = nullptr;
         return TRUE;
-    }
     }
     return FALSE;
 }

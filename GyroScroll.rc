@@ -1,4 +1,22 @@
-// GyroScroll resource script
+#define IDI_APPICON  1
+#define IDD_SETTINGS 101
+#define IDD_ABOUT    102
+#define IDC_STATIC   -1
+
 #include <windows.h>
 
-1 ICON "GyroScroll.ico"
+IDI_APPICON ICON "GyroScroll.ico"
+
+IDD_SETTINGS DIALOGEX 0, 0, 10, 10
+STYLE DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "GyroScroll Settings (GyroScroll.ini)"
+FONT 8, "MS Shell Dlg"
+BEGIN
+END
+
+IDD_ABOUT DIALOGEX 0, 0, 10, 10
+STYLE DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "About GyroScroll"
+FONT 8, "MS Shell Dlg"
+BEGIN
+END

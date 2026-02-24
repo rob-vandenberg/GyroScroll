@@ -40,8 +40,8 @@
  * ─── SETTINGS (GyroScroll.ini, beside the exe) ─────────────────────────────
  *
  *   [GyroScroll]
- *   EdgeRight=8         ; right edge zone width as % of pad width  (e.g. 8 = 8%)
- *   EdgeBottom=8        ; bottom edge zone height as % of pad height
+ *   SideEdge=8          ; side edge zone width as % of pad width (right or left, e.g. 8 = 8%)
+ *   BottomEdge=8        ; bottom edge zone height as % of pad height
  *   SpeedV=20           ; vertical scroll clicks per full pad traversal
  *   SpeedH=20           ; horizontal scroll clicks per full pad traversal
  *   NaturalV=0          ; 1 = natural (reverse) vertical scrolling
@@ -93,9 +93,9 @@
 
 // ─── Version ──────────────────────────────────────────────────────────────────
 #define VERSION_MAJOR  0
-#define VERSION_MINOR  5
-#define VERSION_PATCH  46
-#define VERSION_STRING "0.5.46"
+#define VERSION_MINOR  6
+#define VERSION_PATCH  1
+#define VERSION_STRING "0.6.1"
 #ifdef _WIN64
     #define BITNESS_STRING "64-bit"
 #else
@@ -127,13 +127,14 @@ static constexpr USAGE U_Y          = 0x31;   // Y coordinate
 // Settings  (loaded from / saved to GyroScroll.ini beside the .exe)
 // ═════════════════════════════════════════════════════════════════════════════
 
-static float g_edgeRight        = 0.06f;   // right edge zone, fraction of pad width
+static float g_sideEdge        = 0.06f;   // right edge zone, fraction of pad width
 static float g_edgeBottom       = 0.06f;   // bottom edge zone, fraction of pad height
 static float g_speedV           = 16.0f;   // wheel clicks per full pad traversal, vertical
 static float g_speedH           = 16.0f;   // wheel clicks per full pad traversal, horizontal
 static bool  g_naturalV         = false;   // reverse vertical scroll direction
 static bool  g_naturalH         = false;   // reverse horizontal scroll direction
 static float g_reverseThreshold = 0.012f;  // backward travel required to flip direction
+static bool  g_leftHanded       = false;   // monitor left edge instead of right edge
 
 static std::wstring g_iniPath;
 
@@ -151,13 +152,14 @@ static void LoadSettings()
         return b[0] == L'1';
     };
     // Edge zones stored as integers in INI (e.g. 8 = 0.08)
-    g_edgeRight  = rf(L"EdgeRight",  g_edgeRight  * 100.f) / 100.f;
-    g_edgeBottom = rf(L"EdgeBottom", g_edgeBottom * 100.f) / 100.f;
+    g_sideEdge  = rf(L"SideEdge",  g_sideEdge  * 100.f) / 100.f;
+    g_edgeBottom = rf(L"BottomEdge", g_edgeBottom * 100.f) / 100.f;
     g_speedV     = rf(L"SpeedV",     g_speedV);
     g_speedH     = rf(L"SpeedH",     g_speedH);
     g_naturalV   = rb(L"NaturalV",   g_naturalV);
     g_naturalH   = rb(L"NaturalH",   g_naturalH);
     g_reverseThreshold = rf(L"Sensitivity", g_reverseThreshold * 1000.f) / 1000.f;
+    g_leftHanded = rb(L"LeftHanded", g_leftHanded);
 }
 
 static void SaveSettings()
@@ -172,13 +174,14 @@ static void SaveSettings()
         WritePrivateProfileStringW(S, k, v ? L"1" : L"0", g_iniPath.c_str());
     };
     // All values stored as plain integers (e.g. 0.08 → 8, 0.011 → 11)
-    wi(L"EdgeRight",   (int)(g_edgeRight        * 100.f  + 0.5f));
-    wi(L"EdgeBottom",  (int)(g_edgeBottom        * 100.f  + 0.5f));
+    wi(L"SideEdge",   (int)(g_sideEdge        * 100.f  + 0.5f));
+    wi(L"BottomEdge",  (int)(g_edgeBottom        * 100.f  + 0.5f));
     wi(L"SpeedV",      (int)(g_speedV                     + 0.5f));
     wi(L"SpeedH",      (int)(g_speedH                     + 0.5f));
     wb(L"NaturalV",    g_naturalV);
     wb(L"NaturalH",    g_naturalH);
     wi(L"Sensitivity", (int)(g_reverseThreshold  * 1000.f + 0.5f));
+    wb(L"LeftHanded",  g_leftHanded);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -439,7 +442,7 @@ static std::vector<Contact> ParseContacts(const Touchpad& tp,
 //      reverseDeadzone — must move this far backward to flip direction
 //  • Cursor freeze via ClipCursor (replaces WH_MOUSE_LL to avoid W11 lag)
 //
-// Positions are stored normalised 0..1 (same units as g_edgeRight/Bottom).
+// Positions are stored normalised 0..1 (same units as g_sideEdge/Bottom).
 // Deadzones are also in normalised units (original author used hw/1784;
 // we use equivalent fractions derived from the same calibration).
 //
@@ -518,9 +521,10 @@ static void OnContacts(const std::vector<Contact>& contacts)
     if (g_mode == ScrollMode::IDLE) {
         for (const auto& c : contacts) {
             if (!c.tip) continue;
-            bool inRight  = c.x >= (1.f - g_edgeRight);
             bool inBottom = c.y >= (1.f - g_edgeBottom);
-            if (inRight && !inBottom) {
+            bool inSide   = g_leftHanded ? (c.x <= g_sideEdge)
+                                         : (c.x >= (1.f - g_sideEdge));
+            if (inSide && !inBottom) {
                 g_mode       = ScrollMode::SCROLL_V;
                 g_trackId    = c.id;
                 g_posX       = c.x;  g_posY = c.y;
@@ -532,7 +536,7 @@ static void OnContacts(const std::vector<Contact>& contacts)
                 StartScrollFreeze();
                 return;
             }
-            if (inBottom && !inRight) {
+            if (inBottom && !inSide) {
                 g_mode       = ScrollMode::SCROLL_H;
                 g_trackId    = c.id;
                 g_posX       = c.x;  g_posY = c.y;
@@ -811,6 +815,8 @@ static constexpr UINT IDC_SLD_SPEED_H     = 2013;  // slider for horizontal spee
 static constexpr UINT IDC_AUTOSTART       = 2014;  // checkbox
 static constexpr UINT IDC_REVERSE_THRESH  = 2015;  // edit  — flip sensitivity
 static constexpr UINT IDC_SLD_REVERSE_T   = 2016;  // slider — flip sensitivity
+static constexpr UINT IDC_LEFTHANDED      = 2017;  // checkbox — left-handed mode
+static constexpr UINT IDC_LABEL_SIDE_EDGE = 2018;  // "Right edge:" / "Left edge:" label
 
 static HWND g_settingsWnd = nullptr;
 
@@ -940,7 +946,7 @@ static void SetSliderPos(HWND dlg, UINT id, int pos)
 static void RefreshPreview(HWND hwnd)
 {
     // Edge edits contain integer percent values (e.g. "8" = 0.08)
-    float r = GetEditFloat(hwnd, IDC_EDGE_RIGHT,  g_edgeRight  * 100.f) / 100.f;
+    float r = GetEditFloat(hwnd, IDC_EDGE_RIGHT,  g_sideEdge  * 100.f) / 100.f;
     float b = GetEditFloat(hwnd, IDC_EDGE_BOTTOM, g_edgeBottom * 100.f) / 100.f;
     r = std::max(0.01f, std::min(0.30f, r));
     b = std::max(0.01f, std::min(0.30f, b));
@@ -953,7 +959,7 @@ static void RefreshPreview(HWND hwnd)
 }
 
 // Draw the touchpad preview panel
-static void DrawPreview(HWND panel, float edgeRight, float edgeBottom)
+static void DrawPreview(HWND panel, float sideEdge, float edgeBottom, bool leftHanded)
 {
     PAINTSTRUCT ps;
     HDC dc = BeginPaint(panel, &ps);
@@ -972,10 +978,11 @@ static void DrawPreview(HWND panel, float edgeRight, float edgeBottom)
     // percentage values produce visually equal bar sizes in the preview.
     int base = std::min(W, H);
 
-    // Right edge zone (blue — vertical scroll)
+    // Side edge zone (blue — vertical scroll): left or right depending on handedness
     {
-        int zw = std::max(2, (int)(edgeRight * base));
-        RECT zr = { W - zw, 0, W, H };
+        int zw = std::max(2, (int)(sideEdge * base));
+        RECT zr = leftHanded ? RECT{ 0, 0, zw, H }
+                             : RECT{ W - zw, 0, W, H };
         HBRUSH zb = CreateSolidBrush(RGB(80, 140, 255));
         FillRect(dc, &zr, zb);
         DeleteObject(zb);
@@ -1009,9 +1016,10 @@ static LRESULT CALLBACK PreviewSubclassProc(HWND hwnd, UINT msg,
         LONG_PTR packed = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
         float r = (float)(LOWORD(packed)) / 10000.f;
         float b = (float)(HIWORD(packed)) / 10000.f;
-        if (r < 0.01f) r = g_edgeRight;
+        if (r < 0.01f) r = g_sideEdge;
         if (b < 0.01f) b = g_edgeBottom;
-        DrawPreview(hwnd, r, b);
+        bool lh = (IsDlgButtonChecked(GetParent(hwnd), IDC_LEFTHANDED) == BST_CHECKED);
+        DrawPreview(hwnd, r, b, lh);
         return 0;
     }
     return DefSubclassProc(hwnd, msg, wp, lp);
@@ -1077,10 +1085,19 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
             L"Blue  = vertical scroll zone\nGreen = horizontal scroll zone",
             COL1, PAD + PREVH + 6, PREVW, LH * 2 + 4);
 
-        // Autostart checkbox below legend (left column)
+        // Left-handed checkbox
+        int leftColY = PAD + PREVH + 6 + LH * 2 + 4 + 8;
+        CreateWindowW(L"BUTTON", L"Left handed operation",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+            COL1, leftColY, PREVW, LH + 2,
+            hwnd, reinterpret_cast<HMENU>((UINT_PTR)IDC_LEFTHANDED), hi, nullptr);
+        CheckDlgButton(hwnd, IDC_LEFTHANDED, g_leftHanded ? BST_CHECKED : BST_UNCHECKED);
+        leftColY += LH + 2 + 6;
+
+        // Autostart checkbox
         CreateWindowW(L"BUTTON", L"Start with Windows",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-            COL1, PAD + PREVH + 6 + LH * 2 + 4 + 8, PREVW, LH + 2,
+            COL1, leftColY, PREVW, LH + 2,
             hwnd, reinterpret_cast<HMENU>((UINT_PTR)IDC_AUTOSTART), hi, nullptr);
         CheckDlgButton(hwnd, IDC_AUTOSTART, GetAutostart() ? BST_CHECKED : BST_UNCHECKED);
 
@@ -1090,10 +1107,31 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         MakeLabel(hwnd, hi, L"Edge zones", COL2, ry, RCOLW, LH);
         ry += LH + 4;
 
-        MakeSliderRow(hwnd, hi, L"Right edge:",
-            IDC_EDGE_RIGHT, IDC_SLD_EDGE_R, COL2, ry, RCOLW,
-            1, 30, EdgeToSlider(g_edgeRight));
-        SetEditEdge(hwnd, IDC_EDGE_RIGHT, g_edgeRight);
+        // "Right edge:" / "Left edge:" label — needs a real ID so we can update it live
+        {
+            const wchar_t* sideLabel = g_leftHanded ? L"Left edge:" : L"Right edge:";
+            HWND hw = CreateWindowW(L"STATIC", sideLabel,
+                WS_CHILD | WS_VISIBLE | SS_RIGHT | SS_CENTERIMAGE,
+                COL2, ry, 90, 22,
+                hwnd, reinterpret_cast<HMENU>((UINT_PTR)IDC_LABEL_SIDE_EDGE), hi, nullptr);
+            (void)hw;
+        }
+        // Build the edit and slider for the side edge row
+        {
+            const int LBL_W = 90, EDT_W = 52, GAP = 6, ROW_H = 22;
+            const int SLD_W = RCOLW - LBL_W - EDT_W - GAP;
+            CreateWindowW(L"EDIT", nullptr,
+                WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL,
+                COL2 + LBL_W + GAP, ry, EDT_W, ROW_H,
+                hwnd, reinterpret_cast<HMENU>((UINT_PTR)IDC_EDGE_RIGHT), hi, nullptr);
+            HWND sld = CreateWindowW(TRACKBAR_CLASSW, nullptr,
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_NOTICKS,
+                COL2 + LBL_W + GAP + EDT_W + GAP, ry - 2, SLD_W, ROW_H + 4,
+                hwnd, reinterpret_cast<HMENU>((UINT_PTR)IDC_SLD_EDGE_R), hi, nullptr);
+            SendMessageW(sld, TBM_SETRANGE, TRUE, MAKELPARAM(1, 30));
+            SendMessageW(sld, TBM_SETPOS,   TRUE, EdgeToSlider(g_sideEdge));
+        }
+        SetEditEdge(hwnd, IDC_EDGE_RIGHT, g_sideEdge);
         ry += RH;
 
         MakeSliderRow(hwnd, hi, L"Bottom edge:",
@@ -1201,9 +1239,15 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         UINT id  = LOWORD(wp);
         UINT evt = HIWORD(wp);
 
+        if (id == IDC_LEFTHANDED && evt == BN_CLICKED) {
+            bool lh = (IsDlgButtonChecked(hwnd, IDC_LEFTHANDED) == BST_CHECKED);
+            SetDlgItemTextW(hwnd, IDC_LABEL_SIDE_EDGE, lh ? L"Left edge:" : L"Right edge:");
+            RefreshPreview(hwnd);
+        }
+
         if (evt == EN_CHANGE && !g_syncLock) {
             g_syncLock = true;
-            if (id == IDC_EDGE_RIGHT)     { int pct = std::max(1, std::min(30, (int)GetEditFloat(hwnd, id, g_edgeRight  * 100.f))); SetSliderPos(hwnd, IDC_SLD_EDGE_R,  pct); RefreshPreview(hwnd); }
+            if (id == IDC_EDGE_RIGHT)     { int pct = std::max(1, std::min(30, (int)GetEditFloat(hwnd, id, g_sideEdge  * 100.f))); SetSliderPos(hwnd, IDC_SLD_EDGE_R,  pct); RefreshPreview(hwnd); }
             if (id == IDC_EDGE_BOTTOM)    { int pct = std::max(1, std::min(30, (int)GetEditFloat(hwnd, id, g_edgeBottom * 100.f))); SetSliderPos(hwnd, IDC_SLD_EDGE_B,  pct); RefreshPreview(hwnd); }
             if (id == IDC_SPEED_V)        { float v = GetEditFloat(hwnd, id, g_speedV);     SetSliderPos(hwnd, IDC_SLD_SPEED_V, SpeedToSlider(v)); }
             if (id == IDC_SPEED_H)        { float v = GetEditFloat(hwnd, id, g_speedH);     SetSliderPos(hwnd, IDC_SLD_SPEED_H, SpeedToSlider(v)); }
@@ -1213,7 +1257,7 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
 
         if (id == IDOK) {
             // Edge values are entered as integers (percent), e.g. "8" = 8% = 0.08
-            float r  = GetEditFloat(hwnd, IDC_EDGE_RIGHT,  g_edgeRight  * 100.f) / 100.f;
+            float r  = GetEditFloat(hwnd, IDC_EDGE_RIGHT,  g_sideEdge  * 100.f) / 100.f;
             float b  = GetEditFloat(hwnd, IDC_EDGE_BOTTOM, g_edgeBottom * 100.f) / 100.f;
             float sv = GetEditFloat(hwnd, IDC_SPEED_V,     g_speedV);
             float sh = GetEditFloat(hwnd, IDC_SPEED_H,     g_speedH);
@@ -1224,13 +1268,14 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
             sh = std::max(1.f,   std::min(40.f,  sh));
             // rt: only clamp to sane minimum; no upper clamp — mirrors INI read behaviour
             rt = std::max(0.001f, rt);
-            g_edgeRight        = r;
+            g_sideEdge        = r;
             g_edgeBottom       = b;
             g_speedV           = sv;
             g_speedH           = sh;
             g_reverseThreshold = rt;
             g_naturalV   = (IsDlgButtonChecked(hwnd, IDC_NATURAL_V) == BST_CHECKED);
             g_naturalH   = (IsDlgButtonChecked(hwnd, IDC_NATURAL_H) == BST_CHECKED);
+            g_leftHanded = (IsDlgButtonChecked(hwnd, IDC_LEFTHANDED) == BST_CHECKED);
             SetAutostart(IsDlgButtonChecked(hwnd, IDC_AUTOSTART) == BST_CHECKED);
             SaveSettings();
             DestroyWindow(hwnd);
@@ -1326,7 +1371,7 @@ static void AddTrayIcon(HWND hwnd)
                                  GetSystemMetrics(SM_CYSMICON),
                                  LR_DEFAULTCOLOR);
 
-    wcscpy_s(g_nid.szTip, L"GyroScroll — right/bottom edge to scroll");
+    wcscpy_s(g_nid.szTip, L"GyroScroll");
     Shell_NotifyIconW(NIM_ADD, &g_nid);
 }
 

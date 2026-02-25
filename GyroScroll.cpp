@@ -1,78 +1,10 @@
-/*
- * GyroScroll - Lightweight dependency-free circular touchpad scrolling for Windows
- *
- * Uses Windows Raw HID input to read touchpad finger coordinates directly.
- * No wxWidgets, no abseil — only the Windows SDK (user32, hid, setupapi, shell32,
- * comctl32, gdi32, advapi32).
- *
- * ─── BUILD ────────────────────────────────────────────────────────────────────
- *
- * MSVC (from a Developer Command Prompt):
- *   rc.exe GyroScroll.rc
- *   cl /O2 /EHsc GyroScroll.cpp GyroScroll.res /link user32.lib hid.lib setupapi.lib shell32.lib comctl32.lib gdi32.lib advapi32.lib
- *
- * MinGW-w64:
- *   windres GyroScroll.rc -o GyroScroll.res
- *   g++ -O2 -mwindows -o GyroScroll.exe GyroScroll.cpp GyroScroll.res \
- *       -luser32 -lhid -lsetupapi -lshell32 -lcomctl32 -lgdi32 -ladvapi32
- *
- * ─── HOW CIRCULAR SCROLLING WORKS ─────────────────────────────────────────────
- *
- * When a touch begins in an edge zone we track linear finger movement.
- * Each subsequent report gives a new position; the distance moved drives
- * scrolling. Direction is determined once at the start of each session and
- * stored as a ±1 flag. Because the finger can circle continuously without
- * lifting, indefinite scrolling is possible — that is the gyro part.
- *
- *   ┌──────────────────────────┐
- *   │                    │░░░│  ← right edge zone (vertical scroll)
- *   │                    │░░░│
- *   │                    │░░░│
- *   │                    │░░░│
- *   │░░░░░░░░░░░░░░░░░░░░░░░░│  ← bottom edge zone (horizontal scroll)
- *   └──────────────────────────┘
- *
- * Three deadzones prevent noise and false direction changes:
- *   startDeadzone   — minimum travel before scrolling begins
- *   moveDeadzone    — minimum forward movement per report to continue scrolling
- *   reverseDeadzone — minimum backward travel required to flip direction
- *
- * ─── SETTINGS (GyroScroll.ini, beside the exe) ─────────────────────────────
- *
- *   [GyroScroll]
- *   SideEdge=8          ; side edge zone width as % of pad width (right or left, e.g. 8 = 8%)
- *   BottomEdge=8        ; bottom edge zone height as % of pad height
- *   SpeedV=20           ; vertical scroll clicks per full pad traversal
- *   SpeedH=20           ; horizontal scroll clicks per full pad traversal
- *   NaturalV=0          ; 1 = natural (reverse) vertical scrolling
- *   NaturalH=0          ; 1 = natural (reverse) horizontal scrolling
- *   Sensitivity=11      ; direction flip sensitivity (× 1000 internally, e.g. 11 = 0.011)
- *                       ; UI range is 1–30; values beyond 30 are accepted for fine-tuning
- *
- * ─── AUTOSTART ───────────────────────────────────────────────────────────────
- *
- *   Controlled via the Settings window checkbox "Start with Windows".
- *   Stored in: HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run
- *   Value name: GyroScroll  (present = enabled, absent = disabled)
- *   Not stored in the INI file.
- *
- * ─── KNOWN LIMITATIONS ───────────────────────────────────────────────────────
- *
- * - Targets Windows Precision Touchpad (WPT) devices. Older Synaptics HID
- *   touchpads may use a different report descriptor layout.
- * - Logical coordinate ranges are assumed unsigned (LogicalMin = 0). Devices
- *   that report signed logical ranges will need the sign-extension workaround
- *   described in the ParseContacts() comments below.
- * - Tested structure against the HID descriptor in the WPT spec (v1.0).
- *   Some third-party firmware quirks may require minor adjustments.
- */
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
 #include <shellapi.h>
 #include <commctrl.h>
-#include <hidsdi.h>  // also pulls in hidpi.h on most SDK versions
+#include <hidsdi.h>  
 #include <hidpi.h>
 #include <setupapi.h>
 
@@ -91,17 +23,15 @@
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "advapi32.lib")
 
-// ─── Version ──────────────────────────────────────────────────────────────────
-#define VERSION_MAJOR  0
-#define VERSION_MINOR  6
-#define VERSION_PATCH  1
-#define VERSION_STRING "0.6.1"
+#define VERSION_MAJOR  1
+#define VERSION_MINOR  0
+#define VERSION_PATCH  0
+#define VERSION_STRING "1.0.0"
 #ifdef _WIN64
     #define BITNESS_STRING "64-bit"
 #else
     #define BITNESS_STRING "32-bit"
 #endif
-
 
 #define IDI_APPICON   1
 #define IDD_SETTINGS  101
@@ -109,32 +39,23 @@
 #define IDC_VERSION   200
 #define IDC_LINK_URL  201
 
+static constexpr USAGE UP_GENERIC   = 0x01;   
+static constexpr USAGE UP_DIGITIZER = 0x0D;   
+static constexpr USAGE U_TOUCHPAD   = 0x05;   
+static constexpr USAGE U_TIP_SWITCH = 0x42;   
+static constexpr USAGE U_CONTACT_ID = 0x51;   
+static constexpr USAGE U_CONTACT_CNT= 0x54;   
+static constexpr USAGE U_X          = 0x30;   
+static constexpr USAGE U_Y          = 0x31;   
 
-// ═════════════════════════════════════════════════════════════════════════════
-// HID usage constants (Digitizer usage page 0x0D + Generic Desktop 0x01)
-// ═════════════════════════════════════════════════════════════════════════════
-
-static constexpr USAGE UP_GENERIC   = 0x01;   // Generic Desktop Controls
-static constexpr USAGE UP_DIGITIZER = 0x0D;   // Digitizer Devices
-static constexpr USAGE U_TOUCHPAD   = 0x05;   // Touchpad (application collection)
-static constexpr USAGE U_TIP_SWITCH = 0x42;   // Tip Switch (button: finger touching)
-static constexpr USAGE U_CONTACT_ID = 0x51;   // Contact Identifier
-static constexpr USAGE U_CONTACT_CNT= 0x54;   // Contact Count
-static constexpr USAGE U_X          = 0x30;   // X coordinate
-static constexpr USAGE U_Y          = 0x31;   // Y coordinate
-
-// ═════════════════════════════════════════════════════════════════════════════
-// Settings  (loaded from / saved to GyroScroll.ini beside the .exe)
-// ═════════════════════════════════════════════════════════════════════════════
-
-static float g_sideEdge        = 0.06f;   // right edge zone, fraction of pad width
-static float g_edgeBottom       = 0.06f;   // bottom edge zone, fraction of pad height
-static float g_speedV           = 16.0f;   // wheel clicks per full pad traversal, vertical
-static float g_speedH           = 16.0f;   // wheel clicks per full pad traversal, horizontal
-static bool  g_naturalV         = false;   // reverse vertical scroll direction
-static bool  g_naturalH         = false;   // reverse horizontal scroll direction
-static float g_reverseThreshold = 0.012f;  // backward travel required to flip direction
-static bool  g_leftHanded       = false;   // monitor left edge instead of right edge
+static float g_sideEdge        = 0.06f;   
+static float g_edgeBottom       = 0.06f;   
+static float g_speedV           = 16.0f;   
+static float g_speedH           = 16.0f;   
+static bool  g_naturalV         = false;   
+static bool  g_naturalH         = false;   
+static float g_reverseThreshold = 0.012f;  
+static bool  g_leftHanded       = false;   
 
 static std::wstring g_iniPath;
 
@@ -151,7 +72,7 @@ static void LoadSettings()
         GetPrivateProfileStringW(S, k, d ? L"1" : L"0", b, 4, g_iniPath.c_str());
         return b[0] == L'1';
     };
-    // Edge zones stored as integers in INI (e.g. 8 = 0.08)
+    
     g_sideEdge  = rf(L"SideEdge",  g_sideEdge  * 100.f) / 100.f;
     g_edgeBottom = rf(L"BottomEdge", g_edgeBottom * 100.f) / 100.f;
     g_speedV     = rf(L"SpeedV",     g_speedV);
@@ -173,7 +94,7 @@ static void SaveSettings()
     auto wb = [&](const wchar_t* k, bool v) {
         WritePrivateProfileStringW(S, k, v ? L"1" : L"0", g_iniPath.c_str());
     };
-    // All values stored as plain integers (e.g. 0.08 → 8, 0.011 → 11)
+    
     wi(L"SideEdge",   (int)(g_sideEdge        * 100.f  + 0.5f));
     wi(L"BottomEdge",  (int)(g_edgeBottom        * 100.f  + 0.5f));
     wi(L"SpeedV",      (int)(g_speedV                     + 0.5f));
@@ -184,38 +105,20 @@ static void SaveSettings()
     wb(L"LeftHanded",  g_leftHanded);
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// HID Touchpad discovery
-//
-// A Windows Precision Touchpad HID report has roughly this structure:
-//
-//   Collection(Application, UsagePage=Digitizer, Usage=Touchpad)
-//     Value: ContactCount  (UP=Digitizer, Usage=0x54)  — how many fingers active
-//     Collection(Logical, Usage=Finger) × N  — one per finger slot
-//       Button: TipSwitch  (UP=Digitizer, Usage=0x42) — 1 = finger down
-//       Value:  ContactID  (UP=Digitizer, Usage=0x51) — finger identifier
-//       Value:  X          (UP=GenericDesktop, Usage=0x30)
-//       Value:  Y          (UP=GenericDesktop, Usage=0x31)
-//
-// Each "Collection(Logical)" becomes a distinct LinkCollection in the parsed
-// HID caps. We enumerate all value caps, group by LinkCollection, and build
-// one FingerSlot per group that contains both X and Y.
-// ═════════════════════════════════════════════════════════════════════════════
-
 struct FingerSlot {
-    USHORT link;                    // HID link collection index
-    LONG   xMin, xMax;             // logical coordinate range for X
-    LONG   yMin, yMax;             // logical coordinate range for Y
+    USHORT link;                    
+    LONG   xMin, xMax;             
+    LONG   yMin, yMax;             
 };
 
 struct Touchpad {
     HANDLE               devHandle  = nullptr;
     PHIDP_PREPARSED_DATA preparsed  = nullptr;
     HIDP_CAPS            hidCaps    = {};
-    std::vector<FingerSlot> slots;  // finger link collections (max contacts)
+    std::vector<FingerSlot> slots;  
     bool   hasContactCount = false;
     USHORT contactCountLink = 0;
-    // Unified logical range (used for normalisation; typically all slots share these)
+    
     LONG xMin = 0, xMax = 1;
     LONG yMin = 0, yMax = 1;
 };
@@ -224,12 +127,12 @@ static std::vector<Touchpad> g_pads;
 
 static void BuildTouchpadList(HWND hwnd)
 {
-    // Free old preparsed data buffers
+    
     for (auto& tp : g_pads)
         if (tp.preparsed) HidD_FreePreparsedData(tp.preparsed);
     g_pads.clear();
 
-    // Enumerate raw input devices
+    
     UINT n = 0;
     GetRawInputDeviceList(nullptr, &n, sizeof(RAWINPUTDEVICELIST));
     if (!n) return;
@@ -240,7 +143,7 @@ static void BuildTouchpadList(HWND hwnd)
     for (auto& d : devs) {
         if (d.dwType != RIM_TYPEHID) continue;
 
-        // Quick usage-page/usage check
+        
         RID_DEVICE_INFO info = {};
         info.cbSize = sizeof(info);
         UINT sz = sizeof(info);
@@ -249,7 +152,7 @@ static void BuildTouchpadList(HWND hwnd)
         if (info.hid.usUsagePage != UP_DIGITIZER || info.hid.usUsage != U_TOUCHPAD)
             continue;
 
-        // Fetch preparsed data
+        
         UINT psz = 0;
         GetRawInputDeviceInfoW(d.hDevice, RIDI_PREPARSEDDATA, nullptr, &psz);
         if (!psz) continue;
@@ -259,7 +162,7 @@ static void BuildTouchpadList(HWND hwnd)
 
         Touchpad tp;
         tp.devHandle = d.hDevice;
-        // Allocate persistent buffer (lives for the process lifetime)
+        
         tp.preparsed = reinterpret_cast<PHIDP_PREPARSED_DATA>(new BYTE[psz]);
         std::memcpy(tp.preparsed, pdata.data(), psz);
 
@@ -268,7 +171,7 @@ static void BuildTouchpadList(HWND hwnd)
             continue;
         }
 
-        // Parse value caps → discover finger slots
+        
         USHORT nv = tp.hidCaps.NumberInputValueCaps;
         std::vector<HIDP_VALUE_CAPS> vc(nv);
         HidP_GetValueCaps(HidP_Input, vc.data(), &nv, tp.preparsed);
@@ -280,7 +183,7 @@ static void BuildTouchpadList(HWND hwnd)
         std::map<USHORT, SlotBuilder> builders;
 
         for (auto& cap : vc) {
-            // Some drivers pack multiple usages as a range; handle both cases.
+            
             USAGE uFirst = cap.IsRange ? cap.Range.UsageMin  : cap.NotRange.Usage;
             USAGE uLast  = cap.IsRange ? cap.Range.UsageMax  : cap.NotRange.Usage;
             USHORT lc    = cap.LinkCollection;
@@ -327,7 +230,7 @@ static void BuildTouchpadList(HWND hwnd)
         g_pads.push_back(std::move(tp));
     }
 
-    // Register for raw input from all touchpads, even when not in focus
+    
     if (!g_pads.empty()) {
         RAWINPUTDEVICE rid = {};
         rid.usUsagePage = UP_DIGITIZER;
@@ -338,20 +241,10 @@ static void BuildTouchpadList(HWND hwnd)
     }
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// Contact parsing
-//
-// NOTE on sign extension: HidP_GetUsageValue always returns ULONG. If your
-// device uses a signed logical range (LogicalMin < 0) the returned bits are
-// the two's-complement representation in the HID bit-width.  You would need
-// to sign-extend using the bit-width from the value cap's BitSize field.
-// Standard WPT devices use LogicalMin = 0, so we skip that here.
-// ═════════════════════════════════════════════════════════════════════════════
-
 struct Contact {
     ULONG id;
-    float x, y;  // normalised to [0, 1]
-    bool  tip;   // true = finger is touching
+    float x, y;  
+    bool  tip;   
 };
 
 static std::vector<Contact> ParseContacts(const Touchpad& tp,
@@ -359,18 +252,18 @@ static std::vector<Contact> ParseContacts(const Touchpad& tp,
 {
     std::vector<Contact> out;
 
-    // Button caps for tip switch
+    
     USHORT nb = tp.hidCaps.NumberInputButtonCaps;
     std::vector<HIDP_BUTTON_CAPS> bc(nb ? nb : 1);
     if (nb) HidP_GetButtonCaps(HidP_Input, bc.data(), &nb, tp.preparsed);
 
-    // Active contact count
+    
     int maxSlots    = (int)tp.slots.size();
     int activeCount = maxSlots;
     if (tp.hasContactCount) {
         ULONG cnt = 0;
-        // Contact count lives at link collection 0 (root) on most WPT devices.
-        // Use contactCountLink rather than hard-coding 0 in case it differs.
+        
+        
         if (HidP_GetUsageValue(HidP_Input, UP_DIGITIZER, tp.contactCountLink,
                 U_CONTACT_CNT, &cnt,
                 tp.preparsed, reinterpret_cast<PCHAR>(const_cast<BYTE*>(report)), len)
@@ -398,7 +291,7 @@ static std::vector<Contact> ParseContacts(const Touchpad& tp,
         c.x = (float)((LONG)xv - slot.xMin) / (float)(slot.xMax - slot.xMin);
         c.y = (float)((LONG)yv - slot.yMin) / (float)(slot.yMax - slot.yMin);
 
-        // Clamp to [0, 1] in case of slightly out-of-range values
+        
         c.x = std::max(0.f, std::min(1.f, c.x));
         c.y = std::max(0.f, std::min(1.f, c.y));
 
@@ -408,7 +301,7 @@ static std::vector<Contact> ParseContacts(const Touchpad& tp,
                 == HIDP_STATUS_SUCCESS)
             c.id = idv;
 
-        // Tip switch (a Button cap, not a Value cap)
+        
         for (USHORT j = 0; j < nb; ++j) {
             if (bc[j].UsagePage != UP_DIGITIZER) continue;
             if (bc[j].LinkCollection != slot.link) continue;
@@ -429,57 +322,26 @@ static std::vector<Contact> ParseContacts(const Touchpad& tp,
     return out;
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// Circular scrolling state machine
-//
-//
-//  • Scroll amount per report = distance_moved × sensitivity
-//    (pure linear distance, not angular rotation)
-//  • Scroll direction is a ±1 flag, not a geometry computation
-//  • Three deadzones gate noise without any ring-buffer smoothing:
-//      startDeadzone  — must move this far before scrolling begins
-//      moveDeadzone   — minimum projected movement to continue scrolling
-//      reverseDeadzone — must move this far backward to flip direction
-//  • Cursor freeze via ClipCursor (replaces WH_MOUSE_LL to avoid W11 lag)
-//
-// Positions are stored normalised 0..1 (same units as g_sideEdge/Bottom).
-// Deadzones are also in normalised units (original author used hw/1784;
-// we use equivalent fractions derived from the same calibration).
-//
-// State:  IDLE → SCROLL_V / SCROLL_H on edge touch → back to IDLE on lift.
-// ═════════════════════════════════════════════════════════════════════════════
-
 enum class ScrollMode { IDLE, SCROLL_V, SCROLL_H };
 
 static ScrollMode g_mode       = ScrollMode::IDLE;
 static ULONG      g_trackId    = 0xFFFFFFFF;
 
-// Per-session scroll state (reset on each new session)
-static float g_posX        = 0.f;  // last known finger position (normalised)
+static float g_posX        = 0.f;  
 static float g_posY        = 0.f;
-static float g_dirX        = 0.f;  // current movement direction (unit vector)
+static float g_dirX        = 0.f;  
 static float g_dirY        = 0.f;
-static float g_scrollDir   = 0.f;  // ±1 once established, 0 = not yet set
-static float g_accumScroll = 0.f;  // fractional wheel-click accumulator
+static float g_scrollDir   = 0.f;  
+static float g_accumScroll = 0.f;  
 
-// Deadzone constants (normalised, derived from original's hw/1784 baseline).
-// startDeadzone & moveDeadzone = 10/1784 ≈ 0.0056
-// reverseDeadzone default      = 11/1000 = 0.011  (now user-configurable via g_reverseThreshold)
-// startDeadzoneAngle           = π/4 (45°) — cone within which start is allowed
-// reverseDeadzoneAngle         = π   (180°) — effectively any backward movement
 static constexpr float DZ_START         = 0.0056f;
 static constexpr float DZ_MOVE          = 0.0056f;
 static constexpr float DZ_REVERSE       = 0.0112f;
-static constexpr float DZ_START_ANGLE   = 3.14159f / 4.0f;  // 45°
-static constexpr float DZ_REVERSE_ANGLE = 3.14159f;         // 180°
-
-// Cursor freeze via ClipCursor — confines cursor to a 1×1 pixel rectangle
-// at its current position while a scroll session is active, preventing drift.
-// This avoids WH_MOUSE_LL which causes severe lag on Windows 11 due to its
-// strict low-level hook timeout enforcement at high touchpad report rates.
+static constexpr float DZ_START_ANGLE   = 3.14159f / 4.0f;  
+static constexpr float DZ_REVERSE_ANGLE = 3.14159f;         
 
 static constexpr UINT SCROLL_TIMER_ID = 1;
-static constexpr UINT SCROLL_TIMER_MS = 16;  // ~60Hz flush rate
+static constexpr UINT SCROLL_TIMER_MS = 16;  
 
 static void StartScrollFreeze()
 {
@@ -494,13 +356,11 @@ static void StopScrollFreeze()
     ClipCursor(nullptr);
 }
 
-// Unsigned angle between two vectors. Returns π/2 if either vector is near-zero
-// (safe fallback: caller's condition won't trigger on a zero-length movement).
 static float AngleBetween(float ax, float ay, float bx, float by)
 {
     float normA = std::sqrt(ax*ax + ay*ay);
     float normB = std::sqrt(bx*bx + by*by);
-    if (normA < 1e-7f || normB < 1e-7f) return 1.5707963f;  // π/2
+    if (normA < 1e-7f || normB < 1e-7f) return 1.5707963f;  
     float cosA = (ax*bx + ay*by) / (normA * normB);
     cosA = std::max(-1.f, std::min(1.f, cosA));
     return std::acos(cosA);
@@ -517,7 +377,7 @@ static void SendScrollUnits(int units, bool vertical)
 
 static void OnContacts(const std::vector<Contact>& contacts)
 {
-    // ── IDLE: look for a new edge touch ───────────────────────────────────
+    
     if (g_mode == ScrollMode::IDLE) {
         for (const auto& c : contacts) {
             if (!c.tip) continue;
@@ -528,8 +388,8 @@ static void OnContacts(const std::vector<Contact>& contacts)
                 g_mode       = ScrollMode::SCROLL_V;
                 g_trackId    = c.id;
                 g_posX       = c.x;  g_posY = c.y;
-                // Initial canonical direction: downward (0,+1); sens negated
-                // so upward movement = positive scroll (scroll up).
+                
+                
                 g_dirX       = 0.f;  g_dirY = 1.f;
                 g_scrollDir  = 0.f;
                 g_accumScroll= 0.f;
@@ -540,7 +400,7 @@ static void OnContacts(const std::vector<Contact>& contacts)
                 g_mode       = ScrollMode::SCROLL_H;
                 g_trackId    = c.id;
                 g_posX       = c.x;  g_posY = c.y;
-                // Initial canonical direction: rightward (+1,0)
+                
                 g_dirX       = 1.f;  g_dirY = 0.f;
                 g_scrollDir  = 0.f;
                 g_accumScroll= 0.f;
@@ -551,13 +411,13 @@ static void OnContacts(const std::vector<Contact>& contacts)
         return;
     }
 
-    // ── SCROLLING: find our tracked finger ────────────────────────────────
+    
     const Contact* tr = nullptr;
     for (const auto& c : contacts)
         if (c.id == g_trackId) { tr = &c; break; }
 
     if (!tr || !tr->tip) {
-        // Finger lifted — flush accumulator immediately on release
+        
         if (g_accumScroll != 0.f) {
             int units = (int)(g_accumScroll * WHEEL_DELTA);
             if (units) SendScrollUnits(units, g_mode == ScrollMode::SCROLL_V);
@@ -569,51 +429,51 @@ static void OnContacts(const std::vector<Contact>& contacts)
         return;
     }
 
-    // Movement vector from last position
+    
     float nx = tr->x - g_posX;
     float ny = tr->y - g_posY;
     float dist = std::sqrt(nx*nx + ny*ny);
 
     if (g_scrollDir == 0.f) {
-        // ── Phase 1: waiting for initial direction to be established ──────
-        // The finger must move startDeadzone in the canonical direction (or
-        // exactly opposite) within a ±startDeadzoneAngle/2 cone.
+        
+        
+        
         float dot = nx*g_dirX + ny*g_dirY;
         if (AngleBetween(g_dirX, g_dirY, nx, ny) < DZ_START_ANGLE/2.f && dot > DZ_START) {
             g_scrollDir = 1.f;
         } else if (AngleBetween(g_dirX, g_dirY, -nx, -ny) < DZ_START_ANGLE/2.f && dot < -DZ_START) {
             g_scrollDir = -1.f;
         } else {
-            return;  // still waiting
+            return;  
         }
-        // CRITICAL: update direction to actual movement now, before Phase 2's
-        // reversal check runs. Without this, Phase 2 sees the original canonical
-        // direction (0,1) and immediately mis-detects the first upward stroke
-        // as a "reversal", flipping scrollDir back and locking to one direction.
+        
+        
+        
+        
         if (dist > 1e-6f) { g_dirX = nx / dist; g_dirY = ny / dist; }
     }
 
-    // ── Phase 2: scrolling is active ─────────────────────────────────────
+    
 
-    // Check for direction reversal: movement must be backward within the
-    // reverseDeadzoneAngle cone AND exceed reverseDeadzone distance.
+    
+    
     if (AngleBetween(g_dirX, g_dirY, -nx, -ny) < DZ_REVERSE_ANGLE/2.f) {
         if (dist > g_reverseThreshold) {
             g_scrollDir *= -1.f;
-            // fall through — scroll with new direction, then update state
+            
         } else {
-            // Moving backward but not far enough yet — ignore
+            
             return;
         }
     } else if (dist <= DZ_MOVE && nx*g_dirX + ny*g_dirY <= DZ_MOVE) {
-        // Not reversing AND not moving enough forward — ignore this report
+        
         return;
     }
 
-    // Scroll amount = distance × speed × scrollDir (matches original exactly).
-    // g_speedV/H = clicks per full pad traversal; dist is normalised 0..1.
-    // Vertical uses negative speed so that downward finger = downward scroll
-    // (mirrors the original's -vSens passed to ScrollSession).
+    
+    
+    
+    
     bool isV = (g_mode == ScrollMode::SCROLL_V);
     float speed  = isV ? -g_speedV : g_speedH;
     bool natural = isV ? g_naturalV : g_naturalH;
@@ -621,10 +481,10 @@ static void OnContacts(const std::vector<Contact>& contacts)
     float clicks = g_scrollDir * dist * speed;
     if (natural) clicks = -clicks;
 
-    // Accumulate — timer flushes at ~60Hz
+    
     g_accumScroll += clicks;
 
-    // Update position and direction (unit vector of actual movement)
+    
     g_posX = tr->x;
     g_posY = tr->y;
     if (dist > 1e-6f) {
@@ -646,13 +506,13 @@ static void ProcessRawInput(HRAWINPUT hRaw)
     const auto* raw = reinterpret_cast<const RAWINPUT*>(buf.data());
     if (raw->header.dwType != RIM_TYPEHID) return;
 
-    // Match to one of our registered touchpads
+    
     Touchpad* tp = nullptr;
     for (auto& p : g_pads)
         if (p.devHandle == raw->header.hDevice) { tp = &p; break; }
     if (!tp) return;
 
-    // A single WM_INPUT can pack multiple HID reports (dwCount > 1)
+    
     UINT reportSize  = raw->data.hid.dwSizeHid;
     UINT reportCount = raw->data.hid.dwCount;
     const BYTE* base = raw->data.hid.bRawData;
@@ -663,10 +523,6 @@ static void ProcessRawInput(HRAWINPUT hRaw)
     }
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// System tray
-// ═════════════════════════════════════════════════════════════════════════════
-
 static NOTIFYICONDATAW g_nid    = {};
 static constexpr UINT  WM_TRAY      = WM_USER + 1;
 static constexpr UINT  IDM_QUIT     = 1001;
@@ -674,12 +530,6 @@ static constexpr UINT  IDM_SETTINGS = 1002;
 static constexpr UINT  IDM_ABOUT    = 1003;
 
 static HWND g_aboutWnd = nullptr;
-
-// ─── About dialog ──────────────────────────────────────────────────────────────
-// The GitHub link is a STATIC with SS_NOTIFY (proven reliable).
-// Its underline font is stored in the control's own GWLP_USERDATA — no global.
-// The hand cursor requires subclassing: STATIC handles WM_SETCURSOR itself and
-// sets the arrow cursor before the message ever reaches the dialog proc.
 
 static LRESULT CALLBACK LinkCursorProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
     UINT_PTR, DWORD_PTR)
@@ -697,18 +547,18 @@ static INT_PTR CALLBACK AboutDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         HINSTANCE hi  = GetModuleHandleW(nullptr);
         HFONT font    = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
         const int PAD = 14, ICON_W = 32, W = 400, LH = 16;
-        const int TX  = PAD + ICON_W + PAD;   // text column x
-        const int TW  = W - TX - PAD;         // text column width
+        const int TX  = PAD + ICON_W + PAD;   
+        const int TW  = W - TX - PAD;         
         int y = PAD;
 
-        // Information icon — placed manually, so no MessageBox ding
+        
         HWND hIco = CreateWindowW(L"STATIC", nullptr,
             WS_CHILD | WS_VISIBLE | SS_ICON,
             PAD, PAD, ICON_W, ICON_W, hwnd, nullptr, hi, nullptr);
         SendMessageW(hIco, STM_SETICON,
             (WPARAM)LoadIconW(nullptr, (LPCWSTR)IDI_INFORMATION), 0);
 
-        // Helper: create a plain text STATIC, apply font, advance y
+        
         auto addLine = [&](const wchar_t* txt, int h) {
             HWND hw = CreateWindowW(L"STATIC", txt,
                 WS_CHILD | WS_VISIBLE | SS_LEFT,
@@ -726,8 +576,8 @@ static INT_PTR CALLBACK AboutDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 LH * 2 + 4);
         addLine(L"Copyright \u00A9 2025 Rob Vandenberg", LH);
 
-        // Clickable link — STATIC with SS_NOTIFY.
-        // Underline font is stored in GWLP_USERDATA on the control; freed in WM_DESTROY.
+        
+        
         LOGFONTW lf = {};
         GetObjectW(font, sizeof(lf), &lf);
         lf.lfUnderline = TRUE;
@@ -761,7 +611,7 @@ static INT_PTR CALLBACK AboutDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return TRUE;
     }
     case WM_CTLCOLORSTATIC:
-        // Colour the link blue; leave all other statics at default
+        
         if (GetDlgCtrlID((HWND)lp) == IDC_LINK_URL) {
             SetTextColor((HDC)wp, RGB(0, 102, 204));
             SetBkMode((HDC)wp, TRANSPARENT);
@@ -780,7 +630,7 @@ static INT_PTR CALLBACK AboutDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return TRUE;
     case WM_DESTROY:
     {
-        // Retrieve and free the underline font stored on the link control
+        
         HWND hLink = GetDlgItem(hwnd, IDC_LINK_URL);
         if (hLink) {
             HFONT lf = (HFONT)GetWindowLongPtrW(hLink, GWLP_USERDATA);
@@ -800,30 +650,27 @@ static void ShowAboutBox(HWND hwnd)
     if (g_aboutWnd) { ShowWindow(g_aboutWnd, SW_SHOW); UpdateWindow(g_aboutWnd); }
 }
 
-// Settings dialog control IDs
-static constexpr UINT IDC_EDGE_RIGHT    = 2001;  // edit
-static constexpr UINT IDC_EDGE_BOTTOM   = 2002;  // edit
-static constexpr UINT IDC_SPEED_V       = 2003;  // edit
-static constexpr UINT IDC_SPEED_H       = 2004;  // edit
-static constexpr UINT IDC_NATURAL_V     = 2005;  // checkbox
-static constexpr UINT IDC_NATURAL_H     = 2006;  // checkbox
-static constexpr UINT IDC_PREVIEW       = 2009;  // owner-drawn preview panel
-static constexpr UINT IDC_SLD_EDGE_R    = 2010;  // slider for right edge
-static constexpr UINT IDC_SLD_EDGE_B    = 2011;  // slider for bottom edge
-static constexpr UINT IDC_SLD_SPEED_V   = 2012;  // slider for vertical speed
-static constexpr UINT IDC_SLD_SPEED_H     = 2013;  // slider for horizontal speed
-static constexpr UINT IDC_AUTOSTART       = 2014;  // checkbox
-static constexpr UINT IDC_REVERSE_THRESH  = 2015;  // edit  — flip sensitivity
-static constexpr UINT IDC_SLD_REVERSE_T   = 2016;  // slider — flip sensitivity
-static constexpr UINT IDC_LEFTHANDED      = 2017;  // checkbox — left-handed mode
-static constexpr UINT IDC_LABEL_SIDE_EDGE = 2018;  // "Right edge:" / "Left edge:" label
+static constexpr UINT IDC_EDGE_RIGHT    = 2001;  
+static constexpr UINT IDC_EDGE_BOTTOM   = 2002;  
+static constexpr UINT IDC_SPEED_V       = 2003;  
+static constexpr UINT IDC_SPEED_H       = 2004;  
+static constexpr UINT IDC_NATURAL_V     = 2005;  
+static constexpr UINT IDC_NATURAL_H     = 2006;  
+static constexpr UINT IDC_PREVIEW       = 2009;  
+static constexpr UINT IDC_SLD_EDGE_R    = 2010;  
+static constexpr UINT IDC_SLD_EDGE_B    = 2011;  
+static constexpr UINT IDC_SLD_SPEED_V   = 2012;  
+static constexpr UINT IDC_SLD_SPEED_H     = 2013;  
+static constexpr UINT IDC_AUTOSTART       = 2014;  
+static constexpr UINT IDC_REVERSE_THRESH  = 2015;  
+static constexpr UINT IDC_SLD_REVERSE_T   = 2016;  
+static constexpr UINT IDC_LEFTHANDED      = 2017;  
+static constexpr UINT IDC_LABEL_SIDE_EDGE = 2018;  
 
 static HWND g_settingsWnd = nullptr;
 
-// Prevent re-entrant edit↔slider sync
 static bool g_syncLock = false;
 
-// ─── Autostart registry helpers ───────────────────────────────────────────────
 static const wchar_t* RUN_KEY = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 static const wchar_t* RUN_VAL = L"GyroScroll";
 
@@ -857,52 +704,17 @@ static void SetAutostart(bool enable)
 static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 static void ShowSettingsWindow(HWND parent);
 
-// Forward declarations for layout helpers used inside SettingsDlgProc
 static HWND MakeLabel(HWND p, HINSTANCE hi, const wchar_t* txt, int x, int y, int w, int h);
 static HWND MakeSliderRow(HWND p, HINSTANCE hi, const wchar_t* label,
                            UINT editId, UINT sldId, int x, int y, int rowW,
                            int sldMin, int sldMax, int sldInit);
 
-// ═════════════════════════════════════════════════════════════════════════════
-// Settings window
-//
-// Layout:
-//   ┌──────────────────────────────────────────────────────┐
-//   │  [Large touchpad preview]   Edge zones               │
-//   │                             Right:   [8 ][======]    │
-//   │                             Bottom:  [8 ][======]    │
-//   │                                                      │
-//   │                             Scroll speed             │
-//   │                             Vertical:  [20][======]  │
-//   │                             Horizontal:[20][======]  │
-//   │                             Sensitivity:[11][======] │
-//   │                                                      │
-//   │                             Natural scroll           │
-//   │                             [ ] Reverse vertical     │
-//   │                             [ ] Reverse horizontal   │
-//   │                                                      │
-//   │  Blue  = vertical zone                  [OK][Cancel] │
-//   │  Green = horizontal zone                             │
-//   │  [ ] Start with Windows                              │
-//   └──────────────────────────────────────────────────────┘
-//
-// Sliders and edit boxes are kept in sync bidirectionally.
-// The preview redraws live whenever an edge zone value changes.
-// The autostart checkbox reads/writes the registry directly (not the INI).
-// ═════════════════════════════════════════════════════════════════════════════
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-// Edge zone: stored as fraction (0.01–0.30), displayed/slid as integer 1–30 (percent)
 static int   EdgeToSlider(float v) { return std::max(1, std::min(30, (int)(v * 100.f + 0.5f))); }
 static float SliderToEdge(int pos) { return pos / 100.f; }
 
-// Speed: stored and displayed as integer 1–40
 static int   SpeedToSlider(float v) { return std::max(1, std::min(40, (int)(v + 0.5f))); }
 static float SliderToSpeed(int pos) { return (float)pos; }
 
-// Reverse threshold: stored as fraction (0.001–0.030), displayed/slid as integer 1–30 (× 1000)
-// UI clamps to 1–30; INI accepts any positive value for power-user fine-tuning.
 static int   ThreshToSlider(float v) { return std::max(1, std::min(30, (int)(v * 1000.f + 0.5f))); }
 static float SliderToThresh(int pos) { return pos / 1000.f; }
 
@@ -913,7 +725,6 @@ static float GetEditFloat(HWND dlg, UINT id, float fallback)
     try { return std::stof(buf); } catch (...) { return fallback; }
 }
 
-// Format edge value as integer percent (e.g. 0.08 → "8")
 static void SetEditEdge(HWND dlg, UINT id, float v)
 {
     wchar_t buf[16];
@@ -921,7 +732,6 @@ static void SetEditEdge(HWND dlg, UINT id, float v)
     SetDlgItemTextW(dlg, id, buf);
 }
 
-// Format speed value as plain integer
 static void SetEditSpeed(HWND dlg, UINT id, float v)
 {
     wchar_t buf[16];
@@ -929,7 +739,6 @@ static void SetEditSpeed(HWND dlg, UINT id, float v)
     SetDlgItemTextW(dlg, id, buf);
 }
 
-// Format reverse threshold as integer × 1000 (e.g. 0.011 → "11")
 static void SetEditThresh(HWND dlg, UINT id, float v)
 {
     wchar_t buf[16];
@@ -942,23 +751,21 @@ static void SetSliderPos(HWND dlg, UINT id, int pos)
     SendDlgItemMessageW(dlg, id, TBM_SETPOS, TRUE, pos);
 }
 
-// Trigger a preview repaint with fresh values from the edge edits
 static void RefreshPreview(HWND hwnd)
 {
-    // Edge edits contain integer percent values (e.g. "8" = 0.08)
+    
     float r = GetEditFloat(hwnd, IDC_EDGE_RIGHT,  g_sideEdge  * 100.f) / 100.f;
     float b = GetEditFloat(hwnd, IDC_EDGE_BOTTOM, g_edgeBottom * 100.f) / 100.f;
     r = std::max(0.01f, std::min(0.30f, r));
     b = std::max(0.01f, std::min(0.30f, b));
     HWND prev = GetDlgItem(hwnd, IDC_PREVIEW);
-    // Pack two 16-bit fixed-point values into LONG_PTR (×10000 for precision)
+    
     SetWindowLongPtrW(prev, GWLP_USERDATA,
         (LONG_PTR)(((DWORD)(WORD)(int)(r * 10000.f)) |
                    ((DWORD)(WORD)(int)(b * 10000.f) << 16)));
     InvalidateRect(prev, nullptr, TRUE);
 }
 
-// Draw the touchpad preview panel
 static void DrawPreview(HWND panel, float sideEdge, float edgeBottom, bool leftHanded)
 {
     PAINTSTRUCT ps;
@@ -969,16 +776,16 @@ static void DrawPreview(HWND panel, float sideEdge, float edgeBottom, bool leftH
     int W = rc.right  - rc.left;
     int H = rc.bottom - rc.top;
 
-    // Rounded rectangle background (pad surface)
+    
     HBRUSH padBrush = CreateSolidBrush(RGB(210, 210, 220));
     FillRect(dc, &rc, padBrush);
     DeleteObject(padBrush);
 
-    // Use the same base (shorter dimension) for both zones so that equal
-    // percentage values produce visually equal bar sizes in the preview.
+    
+    
     int base = std::min(W, H);
 
-    // Side edge zone (blue — vertical scroll): left or right depending on handedness
+    
     {
         int zw = std::max(2, (int)(sideEdge * base));
         RECT zr = leftHanded ? RECT{ 0, 0, zw, H }
@@ -988,7 +795,7 @@ static void DrawPreview(HWND panel, float sideEdge, float edgeBottom, bool leftH
         DeleteObject(zb);
     }
 
-    // Bottom edge zone (green — horizontal scroll)
+    
     {
         int zh = std::max(2, (int)(edgeBottom * base));
         RECT zr = { 0, H - zh, W, H };
@@ -997,7 +804,7 @@ static void DrawPreview(HWND panel, float sideEdge, float edgeBottom, bool leftH
         DeleteObject(zb);
     }
 
-    // Border
+    
     HPEN pen = CreatePen(PS_SOLID, 1, RGB(140, 140, 155));
     SelectObject(dc, pen);
     SelectObject(dc, GetStockObject(NULL_BRUSH));
@@ -1007,7 +814,6 @@ static void DrawPreview(HWND panel, float sideEdge, float edgeBottom, bool leftH
     EndPaint(panel, &ps);
 }
 
-// Preview subclass: handle WM_PAINT
 static LRESULT CALLBACK PreviewSubclassProc(HWND hwnd, UINT msg,
                                              WPARAM wp, LPARAM lp,
                                              UINT_PTR, DWORD_PTR)
@@ -1025,54 +831,50 @@ static LRESULT CALLBACK PreviewSubclassProc(HWND hwnd, UINT msg,
     return DefSubclassProc(hwnd, msg, wp, lp);
 }
 
-// Settings dialog procedure
-// This is a proper Windows DLGPROC. Windows handles Tab/Shift-Tab, Enter, and
-// Escape automatically via IsDialogMessage in the main message loop — no manual
-// keyboard handling needed here.
 static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg)
     {
-    // ── Dialog initialisation: create all controls and size the window ─────────
+    
     case WM_INITDIALOG:
     {
         HINSTANCE hi = GetModuleHandleW(nullptr);
 
-        // ── Dimensions ────────────────────────────────────────────────────────
+        
         const int PAD    = 14;
-        const int PREVW  = 220;                    // 16:10 landscape touchpad shape
-        const int PREVH  = 138;                    // 220 * 10/16
+        const int PREVW  = 220;                    
+        const int PREVH  = 138;                    
         const int COL1   = PAD;
-        const int COL2   = COL1 + PREVW + PAD*2;  // right column x
-        const int RCOLW  = 290;                    // right column width
-        const int CLW    = COL2 + RCOLW + PAD;    // total client width
-        const int LH     = 18;                     // section label height
-        const int RH     = 30;                     // slider row height
+        const int COL2   = COL1 + PREVW + PAD*2;  
+        const int RCOLW  = 290;                    
+        const int CLW    = COL2 + RCOLW + PAD;    
+        const int LH     = 18;                     
+        const int RH     = 30;                     
 
-        // Calculate total client height by simulating the layout
+        
         int ry = PAD;
-        ry += LH + 4;   // "Edge zones"
-        ry += RH;       // right edge row
-        ry += RH + 10;  // bottom edge row + gap
-        ry += LH + 4;   // "Scroll speed"
-        ry += RH;       // vertical row
-        ry += RH;       // horizontal row
-        ry += RH + 10;  // sensitivity row + gap
-        ry += LH + 4;   // "Natural scroll"
-        ry += LH + 6;   // checkbox V
-        ry += LH + 6;   // checkbox H
+        ry += LH + 4;   
+        ry += RH;       
+        ry += RH + 10;  
+        ry += LH + 4;   
+        ry += RH;       
+        ry += RH;       
+        ry += RH + 10;  
+        ry += LH + 4;   
+        ry += LH + 6;   
+        ry += LH + 6;   
         const int BTN_H   = 26;
         const int BTN_GAP = 14;
         const int CLH     = ry + BTN_GAP + BTN_H + PAD;
 
-        // Resize dialog to computed pixel dimensions
+        
         RECT adj = { 0, 0, CLW, CLH };
         AdjustWindowRect(&adj, WS_CAPTION | WS_SYSMENU, FALSE);
         SetWindowPos(hwnd, nullptr, 0, 0,
             adj.right - adj.left, adj.bottom - adj.top,
             SWP_NOMOVE | SWP_NOZORDER);
 
-        // ── Preview panel (left) ──────────────────────────────────────────────
+        
         ry = PAD;
         HWND prev = CreateWindowW(L"STATIC", nullptr,
             WS_CHILD | WS_VISIBLE | SS_OWNERDRAW,
@@ -1080,12 +882,12 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
             hwnd, reinterpret_cast<HMENU>((UINT_PTR)IDC_PREVIEW), hi, nullptr);
         SetWindowSubclass(prev, PreviewSubclassProc, 0, 0);
 
-        // Legend below preview
+        
         MakeLabel(hwnd, hi,
             L"Blue  = vertical scroll zone\nGreen = horizontal scroll zone",
             COL1, PAD + PREVH + 6, PREVW, LH * 2 + 4);
 
-        // Left-handed checkbox
+        
         int leftColY = PAD + PREVH + 6 + LH * 2 + 4 + 8;
         CreateWindowW(L"BUTTON", L"Left handed operation",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
@@ -1094,20 +896,20 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         CheckDlgButton(hwnd, IDC_LEFTHANDED, g_leftHanded ? BST_CHECKED : BST_UNCHECKED);
         leftColY += LH + 2 + 6;
 
-        // Autostart checkbox
+        
         CreateWindowW(L"BUTTON", L"Start with Windows",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
             COL1, leftColY, PREVW, LH + 2,
             hwnd, reinterpret_cast<HMENU>((UINT_PTR)IDC_AUTOSTART), hi, nullptr);
         CheckDlgButton(hwnd, IDC_AUTOSTART, GetAutostart() ? BST_CHECKED : BST_UNCHECKED);
 
-        // ── Right column ──────────────────────────────────────────────────────
+        
 
-        // Section: Edge zones
+        
         MakeLabel(hwnd, hi, L"Edge zones", COL2, ry, RCOLW, LH);
         ry += LH + 4;
 
-        // "Right edge:" / "Left edge:" label — needs a real ID so we can update it live
+        
         {
             const wchar_t* sideLabel = g_leftHanded ? L"Left edge:" : L"Right edge:";
             HWND hw = CreateWindowW(L"STATIC", sideLabel,
@@ -1116,7 +918,7 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
                 hwnd, reinterpret_cast<HMENU>((UINT_PTR)IDC_LABEL_SIDE_EDGE), hi, nullptr);
             (void)hw;
         }
-        // Build the edit and slider for the side edge row
+        
         {
             const int LBL_W = 90, EDT_W = 52, GAP = 6, ROW_H = 22;
             const int SLD_W = RCOLW - LBL_W - EDT_W - GAP;
@@ -1140,7 +942,7 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         SetEditEdge(hwnd, IDC_EDGE_BOTTOM, g_edgeBottom);
         ry += RH + 10;
 
-        // Section: Scroll speed
+        
         MakeLabel(hwnd, hi, L"Scroll speed (clicks / swipe)", COL2, ry, RCOLW, LH);
         ry += LH + 4;
 
@@ -1162,7 +964,7 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         SetEditThresh(hwnd, IDC_REVERSE_THRESH, g_reverseThreshold);
         ry += RH + 10;
 
-        // Section: Natural scroll
+        
         MakeLabel(hwnd, hi, L"Natural (reversed) scroll", COL2, ry, RCOLW, LH);
         ry += LH + 4;
 
@@ -1179,13 +981,13 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
             hwnd, reinterpret_cast<HMENU>((UINT_PTR)IDC_NATURAL_H), hi, nullptr);
         CheckDlgButton(hwnd, IDC_NATURAL_H, g_naturalH ? BST_CHECKED : BST_UNCHECKED);
 
-        // ── OK / Cancel ───────────────────────────────────────────────────────
+        
         const int BTN_W = 82;
         const int BTN_Y = CLH - PAD - BTN_H;
         const int BTN_X = CLW - PAD - BTN_W * 2 - 8;
 
-        // Use standard IDOK / IDCANCEL so the dialog manager routes
-        // Enter → OK and Escape → Cancel automatically.
+        
+        
         CreateWindowW(L"BUTTON", L"OK",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
             BTN_X, BTN_Y, BTN_W, BTN_H,
@@ -1195,14 +997,14 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
             BTN_X + BTN_W + 8, BTN_Y, BTN_W, BTN_H,
             hwnd, reinterpret_cast<HMENU>((UINT_PTR)IDCANCEL), hi, nullptr);
 
-        // Apply system dialog font to all children
+        
         HFONT font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
         EnumChildWindows(hwnd, [](HWND child, LPARAM lp) -> BOOL {
             SendMessageW(child, WM_SETFONT, (WPARAM)lp, TRUE);
             return TRUE;
         }, reinterpret_cast<LPARAM>(font));
 
-        // Centre on screen
+        
         RECT wr;
         GetWindowRect(hwnd, &wr);
         int sw = GetSystemMetrics(SM_CXSCREEN);
@@ -1213,10 +1015,10 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
             0, 0, SWP_NOZORDER | SWP_NOSIZE);
 
         RefreshPreview(hwnd);
-        return TRUE;  // let Windows set focus to first tabstop control
+        return TRUE;  
     }
 
-    // ── Slider moved ──────────────────────────────────────────────────────────
+    
     case WM_HSCROLL:
     {
         if (g_syncLock) break;
@@ -1233,7 +1035,7 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         return TRUE;
     }
 
-    // ── Command (edits, buttons) ───────────────────────────────────────────────
+    
     case WM_COMMAND:
     {
         UINT id  = LOWORD(wp);
@@ -1256,7 +1058,7 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         }
 
         if (id == IDOK) {
-            // Edge values are entered as integers (percent), e.g. "8" = 8% = 0.08
+            
             float r  = GetEditFloat(hwnd, IDC_EDGE_RIGHT,  g_sideEdge  * 100.f) / 100.f;
             float b  = GetEditFloat(hwnd, IDC_EDGE_BOTTOM, g_edgeBottom * 100.f) / 100.f;
             float sv = GetEditFloat(hwnd, IDC_SPEED_V,     g_speedV);
@@ -1266,7 +1068,7 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
             b  = std::max(0.01f, std::min(0.30f, b));
             sv = std::max(1.f,   std::min(40.f,  sv));
             sh = std::max(1.f,   std::min(40.f,  sh));
-            // rt: only clamp to sane minimum; no upper clamp — mirrors INI read behaviour
+            
             rt = std::max(0.001f, rt);
             g_sideEdge        = r;
             g_edgeBottom       = b;
@@ -1292,10 +1094,8 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         DestroyWindow(hwnd);
         return TRUE;
     }
-    return FALSE;  // unhandled — do NOT call DefWindowProc in a DLGPROC
+    return FALSE;  
 }
-
-// ── Layout helpers ─────────────────────────────────────────────────────────────
 
 static HWND MakeLabel(HWND p, HINSTANCE hi, const wchar_t* txt, int x, int y, int w, int h)
 {
@@ -1303,8 +1103,6 @@ static HWND MakeLabel(HWND p, HINSTANCE hi, const wchar_t* txt, int x, int y, in
         x, y, w, h, p, nullptr, hi, nullptr);
 }
 
-// One row: label | edit box | trackbar
-// Returns the trackbar HWND so the caller can configure its range.
 static HWND MakeSliderRow(HWND p, HINSTANCE hi,
                            const wchar_t* label,
                            UINT editId, UINT sldId,
@@ -1317,18 +1115,18 @@ static HWND MakeSliderRow(HWND p, HINSTANCE hi,
     const int ROW_H = 22;
     const int SLD_W = rowW - LBL_W - EDT_W - GAP;
 
-    // Label
+    
     CreateWindowW(L"STATIC", label, WS_CHILD | WS_VISIBLE | SS_RIGHT | SS_CENTERIMAGE,
         x, y, LBL_W, ROW_H, p, nullptr, hi, nullptr);
 
-    // Edit
+    
     HWND edit = CreateWindowW(L"EDIT", nullptr,
         WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL,
         x + LBL_W + GAP, y, EDT_W, ROW_H,
         p, reinterpret_cast<HMENU>((UINT_PTR)editId), hi, nullptr);
     (void)edit;
 
-    // Trackbar
+    
     HWND sld = CreateWindowW(TRACKBAR_CLASSW, nullptr,
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_NOTICKS,
         x + LBL_W + GAP + EDT_W + GAP, y - 2, SLD_W, ROW_H + 4,
@@ -1343,9 +1141,9 @@ static void ShowSettingsWindow(HWND parent)
 {
     if (g_settingsWnd) { SetForegroundWindow(g_settingsWnd); return; }
 
-    // Create as a proper modeless dialog from the resource template.
-    // Windows then handles Tab/Shift-Tab, Enter (OK), and Escape (Cancel)
-    // automatically via IsDialogMessage in the main message loop.
+    
+    
+    
     g_settingsWnd = CreateDialogW(
         GetModuleHandleW(nullptr),
         MAKEINTRESOURCEW(IDD_SETTINGS),
@@ -1356,7 +1154,6 @@ static void ShowSettingsWindow(HWND parent)
     ShowWindow(g_settingsWnd, SW_SHOW);
     UpdateWindow(g_settingsWnd);
 }
-
 
 static void AddTrayIcon(HWND hwnd)
 {
@@ -1390,15 +1187,11 @@ static void ShowContextMenu(HWND hwnd)
     AppendMenuW(menu, MF_STRING, IDM_QUIT,     L"&Quit");
     POINT pt;
     GetCursorPos(&pt);
-    SetForegroundWindow(hwnd);   // required for TrackPopupMenu to close correctly
+    SetForegroundWindow(hwnd);   
     TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN,
                    pt.x, pt.y, 0, hwnd, nullptr);
     DestroyMenu(menu);
 }
-
-// ═════════════════════════════════════════════════════════════════════════════
-// Window procedure and entry point
-// ═════════════════════════════════════════════════════════════════════════════
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -1421,8 +1214,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
 
     case WM_INPUT:
-        // Process every message so direction tracking sees the full finger path.
-        // Scroll output is throttled separately via WM_TIMER.
+        
+        
         ProcessRawInput(reinterpret_cast<HRAWINPUT>(lp));
         return DefWindowProcW(hwnd, msg, wp, lp);
 
@@ -1456,7 +1249,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
 {
-    // Prevent multiple instances
+    
     HANDLE mutex = CreateMutexW(nullptr, TRUE, L"GyroScrollMutex_v1");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         MessageBoxW(nullptr, L"GyroScroll is already running.", L"GyroScroll",
@@ -1464,7 +1257,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
         return 0;
     }
 
-    // INI file lives beside the executable
+    
     wchar_t exePath[MAX_PATH] = {};
     GetModuleFileNameW(nullptr, exePath, MAX_PATH);
     g_iniPath = exePath;
@@ -1473,8 +1266,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
                  + L"GyroScroll.ini";
     LoadSettings();
 
-    // Init common controls once at startup — needed for sliders (ICC_BAR_CLASSES)
-    // and the SysLink control in the About dialog (ICC_LINK_CLASS).
+    
+    
     INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_BAR_CLASSES | ICC_LINK_CLASS };
     InitCommonControlsEx(&icc);
 
@@ -1488,7 +1281,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
         return 1;
     }
 
-    // Message-only window — no visible window needed
+    
     HWND hwnd = CreateWindowW(L"GyroScrollWnd_v1", L"GyroScroll",
                                0, 0, 0, 0, 0,
                                HWND_MESSAGE, nullptr, hInst, nullptr);
@@ -1499,8 +1292,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-        // IsDialogMessage handles Tab/Shift-Tab, Enter, and Escape for the
-        // settings dialog automatically — because it is a real dialog window.
+        
+        
         if (g_settingsWnd && IsDialogMessageW(g_settingsWnd, &msg))
             continue;
         if (g_aboutWnd && IsDialogMessageW(g_aboutWnd, &msg))

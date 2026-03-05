@@ -25,8 +25,8 @@
 
 #define VERSION_MAJOR  1
 #define VERSION_MINOR  0
-#define VERSION_PATCH  0
-#define VERSION_STRING "1.0.0"
+#define VERSION_PATCH  1
+#define VERSION_STRING "1.0.1"
 #ifdef _WIN64
     #define BITNESS_STRING "64-bit"
 #else
@@ -126,13 +126,11 @@ struct Touchpad {
 static std::vector<Touchpad> g_pads;
 
 static void BuildTouchpadList(HWND hwnd)
-{
-    
+{    
     for (auto& tp : g_pads)
         if (tp.preparsed) HidD_FreePreparsedData(tp.preparsed);
     g_pads.clear();
 
-    
     UINT n = 0;
     GetRawInputDeviceList(nullptr, &n, sizeof(RAWINPUTDEVICELIST));
     if (!n) return;
@@ -143,7 +141,6 @@ static void BuildTouchpadList(HWND hwnd)
     for (auto& d : devs) {
         if (d.dwType != RIM_TYPEHID) continue;
 
-        
         RID_DEVICE_INFO info = {};
         info.cbSize = sizeof(info);
         UINT sz = sizeof(info);
@@ -152,7 +149,6 @@ static void BuildTouchpadList(HWND hwnd)
         if (info.hid.usUsagePage != UP_DIGITIZER || info.hid.usUsage != U_TOUCHPAD)
             continue;
 
-        
         UINT psz = 0;
         GetRawInputDeviceInfoW(d.hDevice, RIDI_PREPARSEDDATA, nullptr, &psz);
         if (!psz) continue;
@@ -171,7 +167,6 @@ static void BuildTouchpadList(HWND hwnd)
             continue;
         }
 
-        
         USHORT nv = tp.hidCaps.NumberInputValueCaps;
         std::vector<HIDP_VALUE_CAPS> vc(nv);
         HidP_GetValueCaps(HidP_Input, vc.data(), &nv, tp.preparsed);
@@ -230,7 +225,6 @@ static void BuildTouchpadList(HWND hwnd)
         g_pads.push_back(std::move(tp));
     }
 
-    
     if (!g_pads.empty()) {
         RAWINPUTDEVICE rid = {};
         rid.usUsagePage = UP_DIGITIZER;
@@ -247,23 +241,19 @@ struct Contact {
     bool  tip;   
 };
 
-static std::vector<Contact> ParseContacts(const Touchpad& tp,
-                                           const BYTE* report, UINT len)
+static std::vector<Contact> ParseContacts(const Touchpad& tp, const BYTE* report, UINT len)
 {
     std::vector<Contact> out;
 
-    
     USHORT nb = tp.hidCaps.NumberInputButtonCaps;
     std::vector<HIDP_BUTTON_CAPS> bc(nb ? nb : 1);
     if (nb) HidP_GetButtonCaps(HidP_Input, bc.data(), &nb, tp.preparsed);
 
-    
     int maxSlots    = (int)tp.slots.size();
     int activeCount = maxSlots;
     if (tp.hasContactCount) {
         ULONG cnt = 0;
-        
-        
+
         if (HidP_GetUsageValue(HidP_Input, UP_DIGITIZER, tp.contactCountLink,
                 U_CONTACT_CNT, &cnt,
                 tp.preparsed, reinterpret_cast<PCHAR>(const_cast<BYTE*>(report)), len)
@@ -291,7 +281,6 @@ static std::vector<Contact> ParseContacts(const Touchpad& tp,
         c.x = (float)((LONG)xv - slot.xMin) / (float)(slot.xMax - slot.xMin);
         c.y = (float)((LONG)yv - slot.yMin) / (float)(slot.yMax - slot.yMin);
 
-        
         c.x = std::max(0.f, std::min(1.f, c.x));
         c.y = std::max(0.f, std::min(1.f, c.y));
 
@@ -301,7 +290,6 @@ static std::vector<Contact> ParseContacts(const Touchpad& tp,
                 == HIDP_STATUS_SUCCESS)
             c.id = idv;
 
-        
         for (USHORT j = 0; j < nb; ++j) {
             if (bc[j].UsagePage != UP_DIGITIZER) continue;
             if (bc[j].LinkCollection != slot.link) continue;
@@ -326,6 +314,7 @@ enum class ScrollMode { IDLE, SCROLL_V, SCROLL_H };
 
 static ScrollMode g_mode       = ScrollMode::IDLE;
 static ULONG      g_trackId    = 0xFFFFFFFF;
+static int        g_touchZone  = 0;
 
 static float g_posX        = 0.f;  
 static float g_posY        = 0.f;
@@ -377,10 +366,25 @@ static void SendScrollUnits(int units, bool vertical)
 
 static void OnContacts(const std::vector<Contact>& contacts)
 {
-    
+    bool anyTip = false;
+    for (const auto& c : contacts)
+        if (c.tip) { anyTip = true; break; }
+    if (!anyTip)
+        g_touchZone = 0;
+
     if (g_mode == ScrollMode::IDLE) {
         for (const auto& c : contacts) {
             if (!c.tip) continue;
+
+            if (g_touchZone == 0) {
+                bool inBottom = c.y >= (1.f - g_edgeBottom);
+                bool inSide   = g_leftHanded ? (c.x <= g_sideEdge)
+                                             : (c.x >= (1.f - g_sideEdge));
+                g_touchZone = ((inSide && !inBottom) || (inBottom && !inSide)) ? +1 : -1;
+            }
+
+            if (g_touchZone < 0) return;
+
             bool inBottom = c.y >= (1.f - g_edgeBottom);
             bool inSide   = g_leftHanded ? (c.x <= g_sideEdge)
                                          : (c.x >= (1.f - g_sideEdge));
@@ -388,8 +392,7 @@ static void OnContacts(const std::vector<Contact>& contacts)
                 g_mode       = ScrollMode::SCROLL_V;
                 g_trackId    = c.id;
                 g_posX       = c.x;  g_posY = c.y;
-                
-                
+
                 g_dirX       = 0.f;  g_dirY = 1.f;
                 g_scrollDir  = 0.f;
                 g_accumScroll= 0.f;
@@ -411,7 +414,6 @@ static void OnContacts(const std::vector<Contact>& contacts)
         return;
     }
 
-    
     const Contact* tr = nullptr;
     for (const auto& c : contacts)
         if (c.id == g_trackId) { tr = &c; break; }
@@ -425,19 +427,17 @@ static void OnContacts(const std::vector<Contact>& contacts)
         g_mode       = ScrollMode::IDLE;
         g_trackId    = 0xFFFFFFFF;
         g_accumScroll= 0.f;
+        g_touchZone  = 0;
         StopScrollFreeze();
         return;
     }
 
-    
     float nx = tr->x - g_posX;
     float ny = tr->y - g_posY;
     float dist = std::sqrt(nx*nx + ny*ny);
 
     if (g_scrollDir == 0.f) {
-        
-        
-        
+
         float dot = nx*g_dirX + ny*g_dirY;
         if (AngleBetween(g_dirX, g_dirY, nx, ny) < DZ_START_ANGLE/2.f && dot > DZ_START) {
             g_scrollDir = 1.f;
@@ -446,17 +446,10 @@ static void OnContacts(const std::vector<Contact>& contacts)
         } else {
             return;  
         }
-        
-        
-        
-        
+
         if (dist > 1e-6f) { g_dirX = nx / dist; g_dirY = ny / dist; }
     }
 
-    
-
-    
-    
     if (AngleBetween(g_dirX, g_dirY, -nx, -ny) < DZ_REVERSE_ANGLE/2.f) {
         if (dist > g_reverseThreshold) {
             g_scrollDir *= -1.f;
@@ -470,10 +463,6 @@ static void OnContacts(const std::vector<Contact>& contacts)
         return;
     }
 
-    
-    
-    
-    
     bool isV = (g_mode == ScrollMode::SCROLL_V);
     float speed  = isV ? -g_speedV : g_speedH;
     bool natural = isV ? g_naturalV : g_naturalH;
@@ -481,10 +470,8 @@ static void OnContacts(const std::vector<Contact>& contacts)
     float clicks = g_scrollDir * dist * speed;
     if (natural) clicks = -clicks;
 
-    
     g_accumScroll += clicks;
 
-    
     g_posX = tr->x;
     g_posY = tr->y;
     if (dist > 1e-6f) {
@@ -506,13 +493,11 @@ static void ProcessRawInput(HRAWINPUT hRaw)
     const auto* raw = reinterpret_cast<const RAWINPUT*>(buf.data());
     if (raw->header.dwType != RIM_TYPEHID) return;
 
-    
     Touchpad* tp = nullptr;
     for (auto& p : g_pads)
         if (p.devHandle == raw->header.hDevice) { tp = &p; break; }
     if (!tp) return;
 
-    
     UINT reportSize  = raw->data.hid.dwSizeHid;
     UINT reportCount = raw->data.hid.dwCount;
     const BYTE* base = raw->data.hid.bRawData;
@@ -551,14 +536,12 @@ static INT_PTR CALLBACK AboutDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         const int TW  = W - TX - PAD;         
         int y = PAD;
 
-        
         HWND hIco = CreateWindowW(L"STATIC", nullptr,
             WS_CHILD | WS_VISIBLE | SS_ICON,
             PAD, PAD, ICON_W, ICON_W, hwnd, nullptr, hi, nullptr);
         SendMessageW(hIco, STM_SETICON,
             (WPARAM)LoadIconW(nullptr, (LPCWSTR)IDI_INFORMATION), 0);
 
-        
         auto addLine = [&](const wchar_t* txt, int h) {
             HWND hw = CreateWindowW(L"STATIC", txt,
                 WS_CHILD | WS_VISIBLE | SS_LEFT,
@@ -576,8 +559,6 @@ static INT_PTR CALLBACK AboutDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 LH * 2 + 4);
         addLine(L"Copyright \u00A9 2025 Rob Vandenberg", LH);
 
-        
-        
         LOGFONTW lf = {};
         GetObjectW(font, sizeof(lf), &lf);
         lf.lfUnderline = TRUE;
@@ -753,7 +734,6 @@ static void SetSliderPos(HWND dlg, UINT id, int pos)
 
 static void RefreshPreview(HWND hwnd)
 {
-    
     float r = GetEditFloat(hwnd, IDC_EDGE_RIGHT,  g_sideEdge  * 100.f) / 100.f;
     float b = GetEditFloat(hwnd, IDC_EDGE_BOTTOM, g_edgeBottom * 100.f) / 100.f;
     r = std::max(0.01f, std::min(0.30f, r));
@@ -776,16 +756,12 @@ static void DrawPreview(HWND panel, float sideEdge, float edgeBottom, bool leftH
     int W = rc.right  - rc.left;
     int H = rc.bottom - rc.top;
 
-    
     HBRUSH padBrush = CreateSolidBrush(RGB(210, 210, 220));
     FillRect(dc, &rc, padBrush);
     DeleteObject(padBrush);
 
-    
-    
     int base = std::min(W, H);
 
-    
     {
         int zw = std::max(2, (int)(sideEdge * base));
         RECT zr = leftHanded ? RECT{ 0, 0, zw, H }
@@ -795,7 +771,6 @@ static void DrawPreview(HWND panel, float sideEdge, float edgeBottom, bool leftH
         DeleteObject(zb);
     }
 
-    
     {
         int zh = std::max(2, (int)(edgeBottom * base));
         RECT zr = { 0, H - zh, W, H };
@@ -804,7 +779,6 @@ static void DrawPreview(HWND panel, float sideEdge, float edgeBottom, bool leftH
         DeleteObject(zb);
     }
 
-    
     HPEN pen = CreatePen(PS_SOLID, 1, RGB(140, 140, 155));
     SelectObject(dc, pen);
     SelectObject(dc, GetStockObject(NULL_BRUSH));
@@ -814,9 +788,7 @@ static void DrawPreview(HWND panel, float sideEdge, float edgeBottom, bool leftH
     EndPaint(panel, &ps);
 }
 
-static LRESULT CALLBACK PreviewSubclassProc(HWND hwnd, UINT msg,
-                                             WPARAM wp, LPARAM lp,
-                                             UINT_PTR, DWORD_PTR)
+static LRESULT CALLBACK PreviewSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR)
 {
     if (msg == WM_PAINT) {
         LONG_PTR packed = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
@@ -840,7 +812,6 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
     {
         HINSTANCE hi = GetModuleHandleW(nullptr);
 
-        
         const int PAD    = 14;
         const int PREVW  = 220;                    
         const int PREVH  = 138;                    
@@ -851,7 +822,6 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         const int LH     = 18;                     
         const int RH     = 30;                     
 
-        
         int ry = PAD;
         ry += LH + 4;   
         ry += RH;       
@@ -867,14 +837,12 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         const int BTN_GAP = 14;
         const int CLH     = ry + BTN_GAP + BTN_H + PAD;
 
-        
         RECT adj = { 0, 0, CLW, CLH };
         AdjustWindowRect(&adj, WS_CAPTION | WS_SYSMENU, FALSE);
         SetWindowPos(hwnd, nullptr, 0, 0,
             adj.right - adj.left, adj.bottom - adj.top,
             SWP_NOMOVE | SWP_NOZORDER);
 
-        
         ry = PAD;
         HWND prev = CreateWindowW(L"STATIC", nullptr,
             WS_CHILD | WS_VISIBLE | SS_OWNERDRAW,
@@ -882,12 +850,10 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
             hwnd, reinterpret_cast<HMENU>((UINT_PTR)IDC_PREVIEW), hi, nullptr);
         SetWindowSubclass(prev, PreviewSubclassProc, 0, 0);
 
-        
         MakeLabel(hwnd, hi,
             L"Blue  = vertical scroll zone\nGreen = horizontal scroll zone",
             COL1, PAD + PREVH + 6, PREVW, LH * 2 + 4);
 
-        
         int leftColY = PAD + PREVH + 6 + LH * 2 + 4 + 8;
         CreateWindowW(L"BUTTON", L"Left handed operation",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
@@ -896,20 +862,15 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         CheckDlgButton(hwnd, IDC_LEFTHANDED, g_leftHanded ? BST_CHECKED : BST_UNCHECKED);
         leftColY += LH + 2 + 6;
 
-        
         CreateWindowW(L"BUTTON", L"Start with Windows",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
             COL1, leftColY, PREVW, LH + 2,
             hwnd, reinterpret_cast<HMENU>((UINT_PTR)IDC_AUTOSTART), hi, nullptr);
         CheckDlgButton(hwnd, IDC_AUTOSTART, GetAutostart() ? BST_CHECKED : BST_UNCHECKED);
 
-        
-
-        
         MakeLabel(hwnd, hi, L"Edge zones", COL2, ry, RCOLW, LH);
         ry += LH + 4;
 
-        
         {
             const wchar_t* sideLabel = g_leftHanded ? L"Left edge:" : L"Right edge:";
             HWND hw = CreateWindowW(L"STATIC", sideLabel,
@@ -942,7 +903,6 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         SetEditEdge(hwnd, IDC_EDGE_BOTTOM, g_edgeBottom);
         ry += RH + 10;
 
-        
         MakeLabel(hwnd, hi, L"Scroll speed (clicks / swipe)", COL2, ry, RCOLW, LH);
         ry += LH + 4;
 
@@ -964,7 +924,6 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         SetEditThresh(hwnd, IDC_REVERSE_THRESH, g_reverseThreshold);
         ry += RH + 10;
 
-        
         MakeLabel(hwnd, hi, L"Natural (reversed) scroll", COL2, ry, RCOLW, LH);
         ry += LH + 4;
 
@@ -981,13 +940,10 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
             hwnd, reinterpret_cast<HMENU>((UINT_PTR)IDC_NATURAL_H), hi, nullptr);
         CheckDlgButton(hwnd, IDC_NATURAL_H, g_naturalH ? BST_CHECKED : BST_UNCHECKED);
 
-        
         const int BTN_W = 82;
         const int BTN_Y = CLH - PAD - BTN_H;
         const int BTN_X = CLW - PAD - BTN_W * 2 - 8;
 
-        
-        
         CreateWindowW(L"BUTTON", L"OK",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
             BTN_X, BTN_Y, BTN_W, BTN_H,
@@ -997,14 +953,12 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
             BTN_X + BTN_W + 8, BTN_Y, BTN_W, BTN_H,
             hwnd, reinterpret_cast<HMENU>((UINT_PTR)IDCANCEL), hi, nullptr);
 
-        
         HFONT font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
         EnumChildWindows(hwnd, [](HWND child, LPARAM lp) -> BOOL {
             SendMessageW(child, WM_SETFONT, (WPARAM)lp, TRUE);
             return TRUE;
         }, reinterpret_cast<LPARAM>(font));
 
-        
         RECT wr;
         GetWindowRect(hwnd, &wr);
         int sw = GetSystemMetrics(SM_CXSCREEN);
@@ -1018,7 +972,6 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         return TRUE;  
     }
 
-    
     case WM_HSCROLL:
     {
         if (g_syncLock) break;
@@ -1035,7 +988,6 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         return TRUE;
     }
 
-    
     case WM_COMMAND:
     {
         UINT id  = LOWORD(wp);
@@ -1104,10 +1056,10 @@ static HWND MakeLabel(HWND p, HINSTANCE hi, const wchar_t* txt, int x, int y, in
 }
 
 static HWND MakeSliderRow(HWND p, HINSTANCE hi,
-                           const wchar_t* label,
-                           UINT editId, UINT sldId,
-                           int x, int y, int rowW,
-                           int sldMin, int sldMax, int sldInit)
+                          const wchar_t* label,
+                          UINT editId, UINT sldId,
+                          int x, int y, int rowW,
+                          int sldMin, int sldMax, int sldInit)
 {
     const int LBL_W = 90;
     const int EDT_W = 52;
@@ -1115,18 +1067,15 @@ static HWND MakeSliderRow(HWND p, HINSTANCE hi,
     const int ROW_H = 22;
     const int SLD_W = rowW - LBL_W - EDT_W - GAP;
 
-    
     CreateWindowW(L"STATIC", label, WS_CHILD | WS_VISIBLE | SS_RIGHT | SS_CENTERIMAGE,
         x, y, LBL_W, ROW_H, p, nullptr, hi, nullptr);
 
-    
     HWND edit = CreateWindowW(L"EDIT", nullptr,
         WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL,
         x + LBL_W + GAP, y, EDT_W, ROW_H,
         p, reinterpret_cast<HMENU>((UINT_PTR)editId), hi, nullptr);
     (void)edit;
 
-    
     HWND sld = CreateWindowW(TRACKBAR_CLASSW, nullptr,
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_NOTICKS,
         x + LBL_W + GAP + EDT_W + GAP, y - 2, SLD_W, ROW_H + 4,
@@ -1141,9 +1090,6 @@ static void ShowSettingsWindow(HWND parent)
 {
     if (g_settingsWnd) { SetForegroundWindow(g_settingsWnd); return; }
 
-    
-    
-    
     g_settingsWnd = CreateDialogW(
         GetModuleHandleW(nullptr),
         MAKEINTRESOURCEW(IDD_SETTINGS),
@@ -1214,8 +1160,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
 
     case WM_INPUT:
-        
-        
+
         ProcessRawInput(reinterpret_cast<HRAWINPUT>(lp));
         return DefWindowProcW(hwnd, msg, wp, lp);
 
@@ -1248,8 +1193,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 }
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
-{
-    
+{    
     HANDLE mutex = CreateMutexW(nullptr, TRUE, L"GyroScrollMutex_v1");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         MessageBoxW(nullptr, L"GyroScroll is already running.", L"GyroScroll",
@@ -1257,7 +1201,6 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
         return 0;
     }
 
-    
     wchar_t exePath[MAX_PATH] = {};
     GetModuleFileNameW(nullptr, exePath, MAX_PATH);
     g_iniPath = exePath;
@@ -1266,8 +1209,6 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
                  + L"GyroScroll.ini";
     LoadSettings();
 
-    
-    
     INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_BAR_CLASSES | ICC_LINK_CLASS };
     InitCommonControlsEx(&icc);
 
@@ -1281,7 +1222,6 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
         return 1;
     }
 
-    
     HWND hwnd = CreateWindowW(L"GyroScrollWnd_v1", L"GyroScroll",
                                0, 0, 0, 0, 0,
                                HWND_MESSAGE, nullptr, hInst, nullptr);
@@ -1292,8 +1232,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-        
-        
+
         if (g_settingsWnd && IsDialogMessageW(g_settingsWnd, &msg))
             continue;
         if (g_aboutWnd && IsDialogMessageW(g_aboutWnd, &msg))

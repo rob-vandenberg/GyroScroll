@@ -25,8 +25,8 @@
 
 #define VERSION_MAJOR  1
 #define VERSION_MINOR  0
-#define VERSION_PATCH  0
-#define VERSION_STRING "1.0.0"
+#define VERSION_PATCH  1
+#define VERSION_STRING "1.0.1"
 #ifdef _WIN64
     #define BITNESS_STRING "64-bit"
 #else
@@ -326,6 +326,7 @@ enum class ScrollMode { IDLE, SCROLL_V, SCROLL_H };
 
 static ScrollMode g_mode       = ScrollMode::IDLE;
 static ULONG      g_trackId    = 0xFFFFFFFF;
+static int        g_touchZone  = 0;
 
 static float g_posX        = 0.f;  
 static float g_posY        = 0.f;
@@ -377,10 +378,25 @@ static void SendScrollUnits(int units, bool vertical)
 
 static void OnContacts(const std::vector<Contact>& contacts)
 {
-    
+    bool anyTip = false;
+    for (const auto& c : contacts)
+        if (c.tip) { anyTip = true; break; }
+    if (!anyTip)
+        g_touchZone = 0;
+
     if (g_mode == ScrollMode::IDLE) {
         for (const auto& c : contacts) {
             if (!c.tip) continue;
+
+            if (g_touchZone == 0) {
+                bool inBottom = c.y >= (1.f - g_edgeBottom);
+                bool inSide   = g_leftHanded ? (c.x <= g_sideEdge)
+                                             : (c.x >= (1.f - g_sideEdge));
+                g_touchZone = ((inSide && !inBottom) || (inBottom && !inSide)) ? +1 : -1;
+            }
+
+            if (g_touchZone < 0) return;
+
             bool inBottom = c.y >= (1.f - g_edgeBottom);
             bool inSide   = g_leftHanded ? (c.x <= g_sideEdge)
                                          : (c.x >= (1.f - g_sideEdge));
@@ -425,6 +441,7 @@ static void OnContacts(const std::vector<Contact>& contacts)
         g_mode       = ScrollMode::IDLE;
         g_trackId    = 0xFFFFFFFF;
         g_accumScroll= 0.f;
+        g_touchZone  = 0;
         StopScrollFreeze();
         return;
     }

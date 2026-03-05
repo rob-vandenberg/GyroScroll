@@ -1,10 +1,25 @@
 # GyroScroll
 
-**Circular scrolling for Windows Precision Touchpads**
+### Circular scrolling for Windows 10 and Windows 11 Precision Touchpads
 
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/rob-vandenberg/gyroscroll/releases)
+[![Version](https://img.shields.io/badge/version-1.0.1-blue.svg)](https://github.com/rob-vandenberg/gyroscroll/releases)
 ![Windows 10](https://img.shields.io/badge/platform-Windows%2010-0078D6?logo=windows&logoColor=white)
 ![Windows 11](https://img.shields.io/badge/platform-Windows%2011-0078D4?logo=windows11&logoColor=white)
+
+---
+
+### Please support development
+#### Consider a small donation
+
+If GyroScroll improves your daily scrolling experience, please consider donating a small amount to the development of this app.
+You are free to choose any amount you like. Any help is greatly appreciated. It helps me to continue work on the app, fixing bugs and adding new features.
+Thank you very much in advance!
+
+<br>
+
+[![Buy me a coffee](docs/bmac.svg)](https://ko-fi.com/gyroscroll)
+<br><sup>(Paypal, Apple Pay, Google Pay, Ideal/Wero, Cards)</sup>
+
 ---
 
 ## What is circular scrolling?
@@ -16,6 +31,8 @@ Circular scrolling lets you scroll continuously by moving your finger in a **cir
 - **Circle continuously** in either direction for uninterrupted scrolling
 - **Reverse direction** mid-gesture by simply reversing your circular motion
 
+![GyroScroll](docs/animation.gif)
+
 This feature was common on older Synaptics touchpads but disappeared with the introduction of Windows Precision Touchpads. GyroScroll brings it back.
 
 ---
@@ -26,7 +43,7 @@ This feature was common on older Synaptics touchpads but disappeared with the in
 - A **Windows Precision Touchpad** (WPT) — the built-in touchpad on most modern laptops
 
 > **Not sure if your touchpad qualifies?**  
-> Go to *Settings → Bluetooth & devices → Touchpad*. If you see advanced gesture options, you almost certainly have a Precision Touchpad.
+> Go to *Settings → Devices → Touchpad*. If you see advanced gesture options, like multi-touch gestures, then you almost certainly have a Precision Touchpad.
 
 ---
 
@@ -122,7 +139,7 @@ Enable these if you prefer the "natural" scrolling style where content follows y
 | Action | Result |
 |---|---|
 | **Left double-click** | Open Settings |
-| **Right-click** | Context menu (Settings / Quit) |
+| **Right-click** | Context menu (About / Settings / Quit) |
 
 ---
 
@@ -132,13 +149,13 @@ Settings are stored in `GyroScroll.ini` in the same folder as the executable. Yo
 
 ```ini
 [GyroScroll]
-SideEdge=8
-BottomEdge=8
-SpeedV=20
-SpeedH=20
+SideEdge=6
+BottomEdge=6
+SpeedV=16
+SpeedH=16
 NaturalV=0
 NaturalH=0
-Sensitivity=11
+Sensitivity=12
 LeftHanded=0
 ```
 
@@ -150,10 +167,10 @@ LeftHanded=0
 Make sure your touchpad is a Windows Precision Touchpad (see Requirements above). Older or non-standard touchpads are not supported.
 
 **The scroll zone triggers accidentally during normal use**  
-Reduce the Edge zone values in Settings (try 5 or 6 instead of 8).
+Reduce the Edge zone values in Settings. Try a lower value.
 
 **Scrolling feels too fast or too slow**  
-Adjust the Speed values in Settings. Start around 15 for slower, 30 for faster.
+Adjust the Speed values in Settings. Start around 12 for slower, 20 for faster.
 
 **The scroll direction flips unexpectedly**  
 Increase the Sensitivity value in Settings. A higher value requires a more deliberate reversal before the scroll direction changes.
@@ -166,6 +183,17 @@ If you see "GyroScroll is already running", check the system tray — it's alrea
 
 ---
 
+## Disclaimer
+
+GyroScroll is provided "as-is," without any warranty of any kind. While every effort is made to ensure the software works correctly, the developer is not responsible for any issues, data loss, or hardware behavior that may occur while using this tool. By downloading and running GyroScroll, you accept all responsibility for its use on your system.
+
+---
+
 ## Copyright
 
 Copyright © 2025 Rob Vandenberg
+
+<br>
+
+[![Buy me a coffee](docs/bmac.svg)](https://ko-fi.com/gyroscroll)
+<br><sup>(Paypal, Apple Pay, Google Pay, Ideal/Wero, Cards)</sup>

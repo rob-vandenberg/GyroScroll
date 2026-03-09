@@ -2,7 +2,7 @@
 
 ### Circular scrolling for Windows 10 and Windows 11 Precision Touchpads
 
-[![Version](https://img.shields.io/badge/version-1.0.1-blue.svg)](https://github.com/rob-vandenberg/gyroscroll/releases)
+[![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)](https://github.com/rob-vandenberg/gyroscroll/releases)
 ![Windows 10](https://img.shields.io/badge/platform-Windows%2010-0078D6?logo=windows&logoColor=white)
 ![Windows 11](https://img.shields.io/badge/platform-Windows%2011-0078D4?logo=windows11&logoColor=white)
 

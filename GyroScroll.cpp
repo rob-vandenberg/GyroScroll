@@ -24,9 +24,9 @@
 #pragma comment(lib, "advapi32.lib")
 
 #define VERSION_MAJOR  1
-#define VERSION_MINOR  0
-#define VERSION_PATCH  1
-#define VERSION_STRING "1.0.1"
+#define VERSION_MINOR  1
+#define VERSION_PATCH  0
+#define VERSION_STRING "1.1.0"
 #ifdef _WIN64
     #define BITNESS_STRING "64-bit"
 #else

@@ -1,0 +1,36 @@
+art/
+backup/
+*.bat
+*.obj
+*.exe 
+*.pdb 
+*.ilk 
+*.ini
+*.res
+*.suo
+
+# Never push these (cleanup 2026-09-29)
+*.zip
+*.psd
+*.ai
+*.log
+__pycache__/
+*.pyc
+
+# Removed from repo in cleanup 2026-09-29 (unused artwork, old files)
+/GyroScroll.h
+/GyroScroll.svg
+/GyroScroll_0.4.7.cpp
+/GyroScroll_0.5.0.cpp
+/GyroScroll_0.5.10.cpp
+/GyroScroll_0.5.11.cpp
+/GyroScroll_0.5.4.cpp
+/GyroScroll_0.5.44.cpp
+/GyroScroll_0.5.45.cpp
+/GyroScroll_0.5.46.cpp
+/GyroScroll_0.5.5.cpp
+/GyroScroll_0.5.7.cpp
+/GyroScroll_0.5.8.cpp
+/GyroScroll_0.5.9.cpp
+/ssh
+/ssh-add

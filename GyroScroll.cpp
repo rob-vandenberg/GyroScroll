@@ -24,9 +24,13 @@
 #pragma comment(lib, "advapi32.lib")
 
 #define VERSION_MAJOR  1
-#define VERSION_MINOR  1
-#define VERSION_PATCH  0
-#define VERSION_STRING "1.1.0"
+#define VERSION_MINOR  2
+#define VERSION_PATCH  3
+#define VERSION_STRING "1.2.3"
+// v1.2.3: Settings: acceleration checkbox label left-aligned (aligned with "Reverse vertical")
+// v1.2.2: Settings: acceleration checkbox label "Acceleration %:" changed to "Acceleration:"
+// v1.2.1: Touchpad pointer acceleration engine (low-level mouse hook, applies only while a finger is on the touchpad); tray menu shows version
+// v1.2.0: Settings: touchpad pointer acceleration option (checkbox + 100-400% slider); reverse checkboxes on one line
 #ifdef _WIN64
     #define BITNESS_STRING "64-bit"
 #else
@@ -55,7 +59,9 @@ static float g_speedH           = 16.0f;
 static bool  g_naturalV         = false;   
 static bool  g_naturalH         = false;   
 static float g_reverseThreshold = 0.012f;  
-static bool  g_leftHanded       = false;   
+static bool  g_leftHanded       = false;
+static bool  g_accelEnabled     = false;
+static int   g_accelPercent     = 100;
 
 static std::wstring g_iniPath;
 
@@ -81,6 +87,8 @@ static void LoadSettings()
     g_naturalH   = rb(L"NaturalH",   g_naturalH);
     g_reverseThreshold = rf(L"Sensitivity", g_reverseThreshold * 1000.f) / 1000.f;
     g_leftHanded = rb(L"LeftHanded", g_leftHanded);
+    g_accelEnabled = rb(L"AccelEnabled", g_accelEnabled);
+    g_accelPercent = std::max(100, std::min(400, (int)(rf(L"AccelPercent", (float)g_accelPercent) + 0.5f)));
 }
 
 static void SaveSettings()
@@ -103,6 +111,8 @@ static void SaveSettings()
     wb(L"NaturalH",    g_naturalH);
     wi(L"Sensitivity", (int)(g_reverseThreshold  * 1000.f + 0.5f));
     wb(L"LeftHanded",  g_leftHanded);
+    wb(L"AccelEnabled", g_accelEnabled);
+    wi(L"AccelPercent", g_accelPercent);
 }
 
 struct FingerSlot {
@@ -480,6 +490,72 @@ static void OnContacts(const std::vector<Contact>& contacts)
     }
 }
 
+static bool  g_padTouching    = false;
+static HHOOK g_mouseHook      = nullptr;
+static float g_accelSpeed     = 0.f;
+static DWORD g_accelLastTime  = 0;
+static float g_accelRemX      = 0.f;
+static float g_accelRemY      = 0.f;
+
+static constexpr float ACCEL_OFFSET = 0.5f;
+static constexpr float ACCEL_SCALE  = 3.0f;
+
+static float AccelGain(float speed)
+{
+    if (speed <= ACCEL_OFFSET) return 1.f;
+    float maxGain = g_accelPercent / 100.f;
+    return 1.f + (maxGain - 1.f) * (1.f - std::exp(-(speed - ACCEL_OFFSET) / ACCEL_SCALE));
+}
+
+static LRESULT CALLBACK MouseHookProc(int code, WPARAM wp, LPARAM lp)
+{
+    if (code == HC_ACTION && wp == WM_MOUSEMOVE) {
+        const auto* ms = reinterpret_cast<const MSLLHOOKSTRUCT*>(lp);
+        if (!(ms->flags & LLMHF_INJECTED) && g_padTouching && g_mode == ScrollMode::IDLE) {
+
+            DPI_AWARENESS_CONTEXT oldCtx =
+                SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            POINT cur;
+            GetCursorPos(&cur);
+            float dx = (float)(ms->pt.x - cur.x);
+            float dy = (float)(ms->pt.y - cur.y);
+
+            DWORD dt = ms->time - g_accelLastTime;
+            g_accelLastTime = ms->time;
+            if (dt > 100) { g_accelSpeed = 0.f; g_accelRemX = 0.f; g_accelRemY = 0.f; }
+            float speed  = std::sqrt(dx*dx + dy*dy) / (float)std::max<DWORD>(1, std::min<DWORD>(100, dt));
+            g_accelSpeed = 0.5f * (g_accelSpeed + speed);
+
+            float gain = AccelGain(g_accelSpeed);
+            if (gain > 1.f) {
+                float fx = dx * gain + g_accelRemX;
+                float fy = dy * gain + g_accelRemY;
+                LONG  ix = std::lround(fx);
+                LONG  iy = std::lround(fy);
+                g_accelRemX = fx - ix;
+                g_accelRemY = fy - iy;
+                SetCursorPos(cur.x + ix, cur.y + iy);
+                if (oldCtx) SetThreadDpiAwarenessContext(oldCtx);
+                return 1;
+            }
+            g_accelRemX = 0.f; g_accelRemY = 0.f;
+            if (oldCtx) SetThreadDpiAwarenessContext(oldCtx);
+        }
+    }
+    return CallNextHookEx(nullptr, code, wp, lp);
+}
+
+static void UpdateAccelHook()
+{
+    bool want = g_accelEnabled && g_accelPercent > 100 && !g_pads.empty();
+    if (want && !g_mouseHook)
+        g_mouseHook = SetWindowsHookExW(WH_MOUSE_LL, MouseHookProc, GetModuleHandleW(nullptr), 0);
+    else if (!want && g_mouseHook) {
+        UnhookWindowsHookEx(g_mouseHook);
+        g_mouseHook = nullptr;
+    }
+}
+
 static void ProcessRawInput(HRAWINPUT hRaw)
 {
     UINT sz = 0;
@@ -504,7 +580,11 @@ static void ProcessRawInput(HRAWINPUT hRaw)
 
     for (UINT r = 0; r < reportCount; ++r) {
         auto contacts = ParseContacts(*tp, base + r * reportSize, reportSize);
-        if (!contacts.empty()) OnContacts(contacts);
+        if (!contacts.empty()) {
+            g_padTouching = std::any_of(contacts.begin(), contacts.end(),
+                                        [](const Contact& c) { return c.tip; });
+            OnContacts(contacts);
+        }
     }
 }
 
@@ -646,7 +726,10 @@ static constexpr UINT IDC_AUTOSTART       = 2014;
 static constexpr UINT IDC_REVERSE_THRESH  = 2015;  
 static constexpr UINT IDC_SLD_REVERSE_T   = 2016;  
 static constexpr UINT IDC_LEFTHANDED      = 2017;  
-static constexpr UINT IDC_LABEL_SIDE_EDGE = 2018;  
+static constexpr UINT IDC_LABEL_SIDE_EDGE = 2018;
+static constexpr UINT IDC_ACCEL_ENABLE    = 2019;
+static constexpr UINT IDC_ACCEL           = 2020;
+static constexpr UINT IDC_SLD_ACCEL       = 2021;
 
 static HWND g_settingsWnd = nullptr;
 
@@ -699,6 +782,9 @@ static float SliderToSpeed(int pos) { return (float)pos; }
 static int   ThreshToSlider(float v) { return std::max(1, std::min(30, (int)(v * 1000.f + 0.5f))); }
 static float SliderToThresh(int pos) { return pos / 1000.f; }
 
+static int   AccelToSlider(float v) { return std::max(10, std::min(40, (int)(v / 10.f + 0.5f))); }
+static float SliderToAccel(int pos) { return pos * 10.f; }
+
 static float GetEditFloat(HWND dlg, UINT id, float fallback)
 {
     wchar_t buf[32] = {};
@@ -727,9 +813,23 @@ static void SetEditThresh(HWND dlg, UINT id, float v)
     SetDlgItemTextW(dlg, id, buf);
 }
 
+static void SetEditAccel(HWND dlg, UINT id, float v)
+{
+    wchar_t buf[16];
+    swprintf_s(buf, L"%d", (int)(v + 0.5f));
+    SetDlgItemTextW(dlg, id, buf);
+}
+
 static void SetSliderPos(HWND dlg, UINT id, int pos)
 {
     SendDlgItemMessageW(dlg, id, TBM_SETPOS, TRUE, pos);
+}
+
+static void UpdateAccelEnabled(HWND dlg)
+{
+    BOOL on = (IsDlgButtonChecked(dlg, IDC_ACCEL_ENABLE) == BST_CHECKED);
+    EnableWindow(GetDlgItem(dlg, IDC_ACCEL),     on);
+    EnableWindow(GetDlgItem(dlg, IDC_SLD_ACCEL), on);
 }
 
 static void RefreshPreview(HWND hwnd)
@@ -830,9 +930,10 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         ry += RH;       
         ry += RH;       
         ry += RH + 10;  
-        ry += LH + 4;   
-        ry += LH + 6;   
-        ry += LH + 6;   
+        ry += LH + 4;
+        ry += LH + 6 + 10;
+        ry += LH + 4;
+        ry += RH;
         const int BTN_H   = 26;
         const int BTN_GAP = 14;
         const int CLH     = ry + BTN_GAP + BTN_H + PAD;
@@ -927,18 +1028,45 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         MakeLabel(hwnd, hi, L"Natural (reversed) scroll", COL2, ry, RCOLW, LH);
         ry += LH + 4;
 
+        const int SLD_X = 90 + 6 + 52 + 6;
+
         CreateWindowW(L"BUTTON", L"Reverse vertical",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-            COL2, ry, RCOLW, LH + 2,
+            COL2, ry, SLD_X - 6, LH + 2,
             hwnd, reinterpret_cast<HMENU>((UINT_PTR)IDC_NATURAL_V), hi, nullptr);
         CheckDlgButton(hwnd, IDC_NATURAL_V, g_naturalV ? BST_CHECKED : BST_UNCHECKED);
-        ry += LH + 6;
 
         CreateWindowW(L"BUTTON", L"Reverse horizontal",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-            COL2, ry, RCOLW, LH + 2,
+            COL2 + SLD_X, ry, RCOLW - SLD_X, LH + 2,
             hwnd, reinterpret_cast<HMENU>((UINT_PTR)IDC_NATURAL_H), hi, nullptr);
         CheckDlgButton(hwnd, IDC_NATURAL_H, g_naturalH ? BST_CHECKED : BST_UNCHECKED);
+        ry += LH + 6 + 10;
+
+        MakeLabel(hwnd, hi, L"Touchpad pointer", COL2, ry, RCOLW, LH);
+        ry += LH + 4;
+
+        {
+            const int LBL_W = 90, EDT_W = 52, GAP = 6, ROW_H = 22;
+            const int SLD_W = RCOLW - LBL_W - EDT_W - GAP;
+            CreateWindowW(L"BUTTON", L"Acceleration:",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                COL2, ry, LBL_W, ROW_H,
+                hwnd, reinterpret_cast<HMENU>((UINT_PTR)IDC_ACCEL_ENABLE), hi, nullptr);
+            CheckDlgButton(hwnd, IDC_ACCEL_ENABLE, g_accelEnabled ? BST_CHECKED : BST_UNCHECKED);
+            CreateWindowW(L"EDIT", nullptr,
+                WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL,
+                COL2 + LBL_W + GAP, ry, EDT_W, ROW_H,
+                hwnd, reinterpret_cast<HMENU>((UINT_PTR)IDC_ACCEL), hi, nullptr);
+            HWND sld = CreateWindowW(TRACKBAR_CLASSW, nullptr,
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_NOTICKS,
+                COL2 + LBL_W + GAP + EDT_W + GAP, ry - 2, SLD_W, ROW_H + 4,
+                hwnd, reinterpret_cast<HMENU>((UINT_PTR)IDC_SLD_ACCEL), hi, nullptr);
+            SendMessageW(sld, TBM_SETRANGE, TRUE, MAKELPARAM(10, 40));
+            SendMessageW(sld, TBM_SETPOS,   TRUE, AccelToSlider((float)g_accelPercent));
+        }
+        SetEditAccel(hwnd, IDC_ACCEL, (float)g_accelPercent);
+        UpdateAccelEnabled(hwnd);
 
         const int BTN_W = 82;
         const int BTN_Y = CLH - PAD - BTN_H;
@@ -984,6 +1112,7 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         if (id == IDC_SLD_SPEED_V)   { SetEditSpeed(hwnd, IDC_SPEED_V,     SliderToSpeed(pos)); }
         if (id == IDC_SLD_SPEED_H)   { SetEditSpeed(hwnd, IDC_SPEED_H,     SliderToSpeed(pos)); }
         if (id == IDC_SLD_REVERSE_T) { SetEditThresh(hwnd, IDC_REVERSE_THRESH, SliderToThresh(pos)); }
+        if (id == IDC_SLD_ACCEL)     { SetEditAccel(hwnd, IDC_ACCEL, SliderToAccel(pos)); }
         g_syncLock = false;
         return TRUE;
     }
@@ -999,6 +1128,9 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
             RefreshPreview(hwnd);
         }
 
+        if (id == IDC_ACCEL_ENABLE && evt == BN_CLICKED)
+            UpdateAccelEnabled(hwnd);
+
         if (evt == EN_CHANGE && !g_syncLock) {
             g_syncLock = true;
             if (id == IDC_EDGE_RIGHT)     { int pct = std::max(1, std::min(30, (int)GetEditFloat(hwnd, id, g_sideEdge  * 100.f))); SetSliderPos(hwnd, IDC_SLD_EDGE_R,  pct); RefreshPreview(hwnd); }
@@ -1006,6 +1138,7 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
             if (id == IDC_SPEED_V)        { float v = GetEditFloat(hwnd, id, g_speedV);     SetSliderPos(hwnd, IDC_SLD_SPEED_V, SpeedToSlider(v)); }
             if (id == IDC_SPEED_H)        { float v = GetEditFloat(hwnd, id, g_speedH);     SetSliderPos(hwnd, IDC_SLD_SPEED_H, SpeedToSlider(v)); }
             if (id == IDC_REVERSE_THRESH) { int t = std::max(1, std::min(30, (int)GetEditFloat(hwnd, id, g_reverseThreshold * 1000.f))); SetSliderPos(hwnd, IDC_SLD_REVERSE_T, t); }
+            if (id == IDC_ACCEL)          { float v = GetEditFloat(hwnd, id, (float)g_accelPercent); SetSliderPos(hwnd, IDC_SLD_ACCEL, AccelToSlider(v)); }
             g_syncLock = false;
         }
 
@@ -1030,8 +1163,12 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
             g_naturalV   = (IsDlgButtonChecked(hwnd, IDC_NATURAL_V) == BST_CHECKED);
             g_naturalH   = (IsDlgButtonChecked(hwnd, IDC_NATURAL_H) == BST_CHECKED);
             g_leftHanded = (IsDlgButtonChecked(hwnd, IDC_LEFTHANDED) == BST_CHECKED);
+            g_accelEnabled = (IsDlgButtonChecked(hwnd, IDC_ACCEL_ENABLE) == BST_CHECKED);
+            g_accelPercent = std::max(100, std::min(400,
+                (int)(GetEditFloat(hwnd, IDC_ACCEL, (float)g_accelPercent) + 0.5f)));
             SetAutostart(IsDlgButtonChecked(hwnd, IDC_AUTOSTART) == BST_CHECKED);
             SaveSettings();
+            UpdateAccelHook();
             DestroyWindow(hwnd);
         }
         if (id == IDCANCEL) DestroyWindow(hwnd);
@@ -1126,7 +1263,7 @@ static void RemoveTrayIcon()
 static void ShowContextMenu(HWND hwnd)
 {
     HMENU menu = CreatePopupMenu();
-    AppendMenuW(menu, MF_STRING, IDM_ABOUT,    L"&GyroScroll...");
+    AppendMenuW(menu, MF_STRING, IDM_ABOUT,    L"&GyroScroll " VERSION_STRING);
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, IDM_SETTINGS, L"&Settings...");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -1144,6 +1281,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     switch (msg) {
     case WM_CREATE:
         BuildTouchpadList(hwnd);
+        UpdateAccelHook();
         AddTrayIcon(hwnd);
         SetTimer(hwnd, SCROLL_TIMER_ID, SCROLL_TIMER_MS, nullptr);
         return 0;
@@ -1183,6 +1321,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_DESTROY:
         KillTimer(hwnd, SCROLL_TIMER_ID);
+        if (g_mouseHook) { UnhookWindowsHookEx(g_mouseHook); g_mouseHook = nullptr; }
         StopScrollFreeze();
         SaveSettings();
         RemoveTrayIcon();

@@ -14,6 +14,7 @@
 #include <map>
 #include <string>
 #include <vector>
+#include <atomic>
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "hid.lib")
@@ -25,8 +26,9 @@
 
 #define VERSION_MAJOR  1
 #define VERSION_MINOR  2
-#define VERSION_PATCH  3
-#define VERSION_STRING "1.2.3"
+#define VERSION_PATCH  4
+#define VERSION_STRING "1.2.4"
+// v1.2.4: Fix scroll hiccups: mouse hook moved to its own thread (SendInput on the hook thread blocked input for the hook timeout)
 // v1.2.3: Settings: acceleration checkbox label left-aligned (aligned with "Reverse vertical")
 // v1.2.2: Settings: acceleration checkbox label "Acceleration %:" changed to "Acceleration:"
 // v1.2.1: Touchpad pointer acceleration engine (low-level mouse hook, applies only while a finger is on the touchpad); tray menu shows version
@@ -61,7 +63,7 @@ static bool  g_naturalH         = false;
 static float g_reverseThreshold = 0.012f;  
 static bool  g_leftHanded       = false;
 static bool  g_accelEnabled     = false;
-static int   g_accelPercent     = 100;
+static std::atomic<int> g_accelPercent{100};
 
 static std::wstring g_iniPath;
 
@@ -322,7 +324,7 @@ static std::vector<Contact> ParseContacts(const Touchpad& tp, const BYTE* report
 
 enum class ScrollMode { IDLE, SCROLL_V, SCROLL_H };
 
-static ScrollMode g_mode       = ScrollMode::IDLE;
+static std::atomic<ScrollMode> g_mode{ScrollMode::IDLE};
 static ULONG      g_trackId    = 0xFFFFFFFF;
 static int        g_touchZone  = 0;
 
@@ -490,8 +492,9 @@ static void OnContacts(const std::vector<Contact>& contacts)
     }
 }
 
-static bool  g_padTouching    = false;
-static HHOOK g_mouseHook      = nullptr;
+static std::atomic<bool> g_padTouching{false};
+static HANDLE g_hookThread    = nullptr;
+static DWORD  g_hookThreadId  = 0;
 static float g_accelSpeed     = 0.f;
 static DWORD g_accelLastTime  = 0;
 static float g_accelRemX      = 0.f;
@@ -545,14 +548,40 @@ static LRESULT CALLBACK MouseHookProc(int code, WPARAM wp, LPARAM lp)
     return CallNextHookEx(nullptr, code, wp, lp);
 }
 
+// The hook runs on its own thread: a low-level hook is called on the thread that
+// installed it, and that thread must never be busy (e.g. inside SendInput for a
+// scroll step), or Windows holds all mouse input until the hook timeout.
+static DWORD WINAPI HookThreadProc(LPVOID param)
+{
+    MSG msg;
+    PeekMessageW(&msg, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
+    HHOOK hook = SetWindowsHookExW(WH_MOUSE_LL, MouseHookProc, GetModuleHandleW(nullptr), 0);
+    SetEvent(static_cast<HANDLE>(param));
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {}
+    if (hook) UnhookWindowsHookEx(hook);
+    return 0;
+}
+
+static void StopAccelHook()
+{
+    if (!g_hookThread) return;
+    PostThreadMessageW(g_hookThreadId, WM_QUIT, 0, 0);
+    WaitForSingleObject(g_hookThread, INFINITE);
+    CloseHandle(g_hookThread);
+    g_hookThread   = nullptr;
+    g_hookThreadId = 0;
+}
+
 static void UpdateAccelHook()
 {
     bool want = g_accelEnabled && g_accelPercent > 100 && !g_pads.empty();
-    if (want && !g_mouseHook)
-        g_mouseHook = SetWindowsHookExW(WH_MOUSE_LL, MouseHookProc, GetModuleHandleW(nullptr), 0);
-    else if (!want && g_mouseHook) {
-        UnhookWindowsHookEx(g_mouseHook);
-        g_mouseHook = nullptr;
+    if (want && !g_hookThread) {
+        HANDLE ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        g_hookThread = CreateThread(nullptr, 0, HookThreadProc, ready, 0, &g_hookThreadId);
+        if (g_hookThread) WaitForSingleObject(ready, INFINITE);
+        CloseHandle(ready);
+    } else if (!want && g_hookThread) {
+        StopAccelHook();
     }
 }
 
@@ -1321,7 +1350,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_DESTROY:
         KillTimer(hwnd, SCROLL_TIMER_ID);
-        if (g_mouseHook) { UnhookWindowsHookEx(g_mouseHook); g_mouseHook = nullptr; }
+        StopAccelHook();
         StopScrollFreeze();
         SaveSettings();
         RemoveTrayIcon();
